@@ -1,0 +1,5 @@
+# GoReleaser output
+/dist/
+
+# Local build artifacts
+/sx
