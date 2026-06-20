@@ -1,0 +1,11 @@
+# Copy to ~/.config/sx/config.yaml (global) or .sx.yaml in a repo (per-project).
+# Per-project values override global ones.
+
+worktree_dir: .worktrees      # where worktrees are created, relative to repo root
+
+files:
+  copy:
+    - .env
+    - .env.*
+  symlink:
+    - node_modules
