@@ -10,8 +10,17 @@ Replaces the old `.config/tmux/session-switcher.sh`.
 ## Install
 
 ```sh
-cd ~/dotfiles/sx
-make install        # → $GOPATH/bin/sx (already on PATH)
+go install github.com/m7medVision/sx@latest
+```
+
+This drops the `sx` binary in `$(go env GOPATH)/bin` (usually `~/go/bin`); make
+sure that's on your `PATH`. Prebuilt binaries for Linux/macOS are also attached
+to each [GitHub release](https://github.com/m7medVision/sx/releases).
+
+From a checkout instead:
+
+```sh
+make install        # → $GOPATH/bin/sx
 ```
 
 Bound in `~/.tmux.conf`:
@@ -37,6 +46,14 @@ In the session list:
 `ctrl-w` only appears inside a git repo. New worktrees go to
 `<repo>/.worktrees/<branch>` and `.worktrees/` is auto-added to `.gitignore`.
 You can pick an existing branch or type a brand-new one.
+
+## Update checks
+
+On launch `sx` checks GitHub (at most once a day, cached in
+`~/.cache/sx/update.json`) for a newer release and shows a one-line banner if
+one exists — upgrade with `go install github.com/m7medVision/sx@latest`. The
+check runs in the background, so it never delays the popup and silently does
+nothing when offline. Disable it entirely with `SX_NO_UPDATE_CHECK=1`.
 
 ## Config
 
