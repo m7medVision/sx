@@ -5,9 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"sx/internal/config"
-	"sx/internal/git"
-	"sx/internal/tmux"
+	"github.com/m7medVision/sx/internal/config"
+	"github.com/m7medVision/sx/internal/git"
+	"github.com/m7medVision/sx/internal/tmux"
+	"github.com/m7medVision/sx/internal/update"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -28,6 +29,7 @@ var (
 	selStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2"))
 	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	errStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	updateStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
 	previewStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("7")).
 			BorderStyle(lipgloss.NormalBorder()).BorderLeft(true).
 			BorderForeground(lipgloss.Color("8")).PaddingLeft(1)
@@ -58,10 +60,29 @@ type Model struct {
 
 	status string // footer message (errors / warnings)
 	Target string // session to switch to once the popup closes
+
+	version      string // running build version (for the update check)
+	updateLatest string // latest release tag, once known
+	updateAvail  bool   // a newer release is available
+}
+
+// updateMsg carries the result of the async GitHub update check.
+type updateMsg struct {
+	latest string
+	newer  bool
+}
+
+// checkUpdateCmd runs the update check off the render path; Bubble Tea executes
+// it in a goroutine so the popup paints immediately regardless of the network.
+func checkUpdateCmd(version string) tea.Cmd {
+	return func() tea.Msg {
+		latest, newer := update.Check(version)
+		return updateMsg{latest: latest, newer: newer}
+	}
 }
 
 // New builds the initial model rooted at the launching pane's directory.
-func New(paneDir string) Model {
+func New(paneDir, version string) Model {
 	ti := textinput.New()
 	ti.Prompt = "› "
 
@@ -79,14 +100,20 @@ func New(paneDir string) Model {
 		attached: tmux.ClientSession(),
 		sessions: tmux.ListSessions(),
 		input:    ti,
+		version:  version,
 	}
 }
 
-func (m Model) Init() tea.Cmd { return nil }
+func (m Model) Init() tea.Cmd { return checkUpdateCmd(m.version) }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if ws, ok := msg.(tea.WindowSizeMsg); ok {
 		m.width, m.height = ws.Width, ws.Height
+		return m, nil
+	}
+	if u, ok := msg.(updateMsg); ok {
+		m.updateLatest = u.latest
+		m.updateAvail = u.newer
 		return m, nil
 	}
 	switch state(m.state) {
@@ -303,6 +330,20 @@ func (m Model) doKill(sess tmux.Session, removeWt bool, wtRoot string) Model {
 // ── Views ───────────────────────────────────────────────────────────
 
 func (m Model) View() string {
+	return m.updateBanner() + m.body()
+}
+
+// updateBanner is a one-line nudge shown across all states when a newer release
+// is available; empty otherwise.
+func (m Model) updateBanner() string {
+	if !m.updateAvail {
+		return ""
+	}
+	return updateStyle.Render(" ▲ update available: "+m.version+" → "+m.updateLatest+
+		"   go install github.com/m7medVision/sx@latest") + "\n"
+}
+
+func (m Model) body() string {
 	switch state(m.state) {
 	case stateNewSession:
 		return "\n" + titleStyle.Render(" New session ") + "\n\n" +

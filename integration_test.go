@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"sx/internal/config"
-	"sx/internal/git"
+	"github.com/m7medVision/sx/internal/config"
+	"github.com/m7medVision/sx/internal/git"
 )
 
 // TestWorktreeAndFiles exercises the real git-worktree + file-copy pipeline

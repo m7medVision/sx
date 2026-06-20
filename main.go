@@ -12,19 +12,45 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime/debug"
 
-	"sx/internal/tmux"
-	"sx/internal/ui"
+	"github.com/m7medVision/sx/internal/tmux"
+	"github.com/m7medVision/sx/internal/ui"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// version is the build version, injected at release time via -ldflags
+// "-X main.version=...". It defaults to "dev" for local builds.
+var version = "dev"
+
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "menu" {
-		runMenu()
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "menu":
+			runMenu()
+			return
+		case "version", "--version", "-v":
+			fmt.Println("sx", resolveVersion())
+			return
+		}
 	}
 	runLauncher()
+}
+
+// resolveVersion returns the build version. GoReleaser binaries carry it via
+// ldflags; `go install ...@version` doesn't set ldflags, so we fall back to the
+// module version Go embeds in the build info. Local builds report "dev".
+func resolveVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if v := bi.Main.Version; v != "" && v != "(devel)" {
+			return v
+		}
+	}
+	return version
 }
 
 // runLauncher opens the popup, then switches to whatever the menu recorded.
@@ -72,7 +98,7 @@ func runMenu() {
 		paneDir, _ = os.Getwd()
 	}
 
-	model, err := tea.NewProgram(ui.New(paneDir), tea.WithAltScreen()).Run()
+	model, err := tea.NewProgram(ui.New(paneDir, resolveVersion()), tea.WithAltScreen()).Run()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sx:", err)
 		os.Exit(1)

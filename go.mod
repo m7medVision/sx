@@ -1,4 +1,4 @@
-module sx
+module github.com/m7medVision/sx
 
 go 1.26.4
 
