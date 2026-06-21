@@ -1,6 +1,6 @@
 # sx
 
-A small lazygit-style TUI for **tmux sessions + git-worktree agent workflows**.
+A small TUI for **tmux sessions + git-worktree agent workflows**.
 Each task gets its own git worktree (isolation) running in its own tmux session.
 
 ## Install
