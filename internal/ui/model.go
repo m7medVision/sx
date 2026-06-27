@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/m7medVision/sx/internal/agent"
 	"github.com/m7medVision/sx/internal/config"
 	"github.com/m7medVision/sx/internal/git"
 	"github.com/m7medVision/sx/internal/tmux"
@@ -34,6 +35,20 @@ var (
 	previewStyle = lipgloss.NewStyle().
 			BorderStyle(lipgloss.NormalBorder()).BorderLeft(true).
 			BorderForeground(lipgloss.Color("8")).PaddingLeft(1)
+
+	// Per-state badge styles, keyed by agent.State.
+	badgeStyles = map[agent.State]lipgloss.Style{
+		agent.Waiting: lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
+		agent.Working: lipgloss.NewStyle().Foreground(lipgloss.Color("4")),
+		agent.Plan:    lipgloss.NewStyle().Foreground(lipgloss.Color("5")),
+		agent.Idle:    lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+	}
+	badgeText = map[agent.State]string{
+		agent.Waiting: "● waiting",
+		agent.Working: "◐ working",
+		agent.Plan:    "⏸ plan",
+		agent.Idle:    "· idle",
+	}
 )
 
 // Model is the TUI state.
@@ -48,6 +63,9 @@ type Model struct {
 
 	sessions []tmux.Session
 	cursor   int
+
+	markers agent.Markers          // agent-detection markers (defaults + config)
+	states  map[string]agent.State // session name → detected agent state
 
 	input textinput.Model // new-session name OR branch query
 
@@ -93,16 +111,32 @@ func New(paneDir, version string) Model {
 		repoRoot, _ = git.RepoRoot(paneDir)
 	}
 
+	markers := config.Load(repoRoot).Markers()
+	sessions := tmux.ListSessions()
+
 	return Model{
 		state:    int(stateList),
 		paneDir:  paneDir,
 		inRepo:   inRepo,
 		repoRoot: repoRoot,
 		attached: tmux.ClientSession(),
-		sessions: tmux.ListSessions(),
+		sessions: sessions,
 		input:    ti,
 		version:  version,
+		markers:  markers,
+		states:   detectStates(sessions, markers),
 	}
+}
+
+// detectStates classifies every session by capturing its active pane and
+// running the text through agent.Detect. One capture-pane per session, done
+// once when the list is (re)built — not per keystroke.
+func detectStates(sessions []tmux.Session, markers agent.Markers) map[string]agent.State {
+	states := make(map[string]agent.State, len(sessions))
+	for _, s := range sessions {
+		states[s.Name] = agent.Detect(tmux.CapturePlain(s.Name), markers)
+	}
+	return states
 }
 
 func (m Model) Init() tea.Cmd { return checkUpdateCmd(m.version) }
@@ -321,6 +355,7 @@ func (m Model) doKill(sess tmux.Session, removeWt bool, wtRoot string) Model {
 		m.status = "Failed to kill '" + sess.Name + "'."
 	}
 	m.sessions = tmux.ListSessions()
+	m.states = detectStates(m.sessions, m.markers)
 	if m.cursor >= len(m.sessions) {
 		m.cursor = max(0, len(m.sessions)-1)
 	}
@@ -370,16 +405,24 @@ func (m Model) listView() string {
 	if len(m.sessions) == 0 {
 		b.WriteString(dimStyle.Render("  (no sessions)") + "\n")
 	}
+	nameCol := m.nameColWidth()
 	for i, s := range m.sessions {
-		line := "  " + s.Name
+		prefix := "  "
+		if i == m.cursor {
+			prefix = "› "
+		}
+		// Pad the name to a shared column so the badges line up.
+		pad := nameCol - len([]rune(s.Name))
+		if pad < 0 {
+			pad = 0
+		}
+		namePart := prefix + s.Name + strings.Repeat(" ", pad)
+		if i == m.cursor {
+			namePart = selStyle.Render(namePart)
+		}
+		line := namePart + "  " + m.badge(s.Name)
 		if s.Name == m.attached {
 			line += dimStyle.Render(" (attached)")
-		}
-		if i == m.cursor {
-			line = selStyle.Render("› " + s.Name)
-			if s.Name == m.attached {
-				line += dimStyle.Render(" (attached)")
-			}
 		}
 		b.WriteString(line + "\n")
 	}
@@ -424,6 +467,27 @@ func (m Model) leftWidth() int {
 		return m.width
 	}
 	return m.width * 45 / 100
+}
+
+// badge renders the colored status glyph+label for a session's detected state.
+func (m Model) badge(name string) string {
+	st := m.states[name]
+	return badgeStyles[st].Render(badgeText[st])
+}
+
+// nameColWidth is the column the session names are padded to so badges align:
+// the longest name, capped to leave room for the "  ● waiting" badge.
+func (m Model) nameColWidth() int {
+	col := 0
+	for _, s := range m.sessions {
+		if l := len([]rune(s.Name)); l > col {
+			col = l
+		}
+	}
+	if cap := m.leftWidth() - 14; cap > 0 && col > cap {
+		col = cap
+	}
+	return col
 }
 
 // renderPreview captures the session's active pane and clips it to the preview
