@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type state int
@@ -30,7 +31,7 @@ var (
 	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	errStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 	updateStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
-	previewStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("7")).
+	previewStyle = lipgloss.NewStyle().
 			BorderStyle(lipgloss.NormalBorder()).BorderLeft(true).
 			BorderForeground(lipgloss.Color("8")).PaddingLeft(1)
 )
@@ -386,7 +387,7 @@ func (m Model) listView() string {
 	left := lipgloss.NewStyle().Width(m.leftWidth()).Render(b.String())
 	view := left
 	if len(m.sessions) > 0 && m.width > 50 {
-		preview := tmux.ListWindows(m.sessions[m.cursor].Name)
+		preview := m.renderPreview(m.sessions[m.cursor].Name)
 		view = lipgloss.JoinHorizontal(lipgloss.Top, left, previewStyle.Render(preview))
 	}
 	return view + "\n" + dimStyle.Render(header) + m.footer()
@@ -423,6 +424,43 @@ func (m Model) leftWidth() int {
 		return m.width
 	}
 	return m.width * 45 / 100
+}
+
+// renderPreview captures the session's active pane and clips it to the preview
+// box. The capture is full-terminal-width/height, so each line is truncated to
+// the box width (ANSI-aware, to keep colors intact) and the whole thing to the
+// available height — otherwise long lines wrap into the list column.
+func (m Model) renderPreview(session string) string {
+	raw := tmux.CapturePane(session)
+	if raw == "" {
+		return ""
+	}
+	// previewStyle adds a 1-col left border + 1-col left padding.
+	w := m.width - m.leftWidth() - 2
+	if w < 1 {
+		w = 1
+	}
+	lines := strings.Split(raw, "\n")
+	if h := m.previewHeight(); len(lines) > h {
+		lines = lines[:h]
+	}
+	for i, ln := range lines {
+		lines[i] = ansi.Truncate(ln, w, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// previewHeight is how many capture lines fit beside the list, leaving room for
+// the title, the header/footer, and the update banner when shown.
+func (m Model) previewHeight() int {
+	h := m.height - 4
+	if m.updateAvail {
+		h--
+	}
+	if h < 1 {
+		return 1
+	}
+	return h
 }
 
 // ── helpers ─────────────────────────────────────────────────────────

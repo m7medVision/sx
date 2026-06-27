@@ -34,11 +34,12 @@ func ListSessions() []Session {
 	return sessions
 }
 
-// ListWindows returns a human-readable window listing for a session, used as
-// the preview pane content.
-func ListWindows(session string) string {
-	out, _ := run("list-windows", "-t", session, "-F",
-		"#{window_index}: #{window_name}  [#{pane_current_path}]")
+// CapturePane returns a colored snapshot of the session's active pane, used as
+// live preview content. -e keeps ANSI styling; -p writes to stdout. The
+// -t <session> target resolves to the active pane of the session's current
+// window.
+func CapturePane(session string) string {
+	out, _ := run("capture-pane", "-ep", "-t", session)
 	return out
 }
 
