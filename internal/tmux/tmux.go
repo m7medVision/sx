@@ -43,6 +43,14 @@ func CapturePane(session string) string {
 	return out
 }
 
+// CapturePlain returns the session's active pane as plain text (no ANSI), used
+// for agent-state detection where escape sequences would break substring
+// matching.
+func CapturePlain(session string) string {
+	out, _ := run("capture-pane", "-p", "-t", session)
+	return out
+}
+
 // HasSession reports whether a session with the given name exists.
 func HasSession(name string) bool {
 	err := exec.Command("tmux", "has-session", "-t", name).Run()
