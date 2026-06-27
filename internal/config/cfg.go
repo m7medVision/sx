@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/m7medVision/sx/internal/agent"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -18,8 +20,20 @@ type Files struct {
 
 // Config is the merged sx configuration.
 type Config struct {
-	WorktreeDir string `yaml:"worktree_dir"`
-	Files       Files  `yaml:"files"`
+	WorktreeDir string        `yaml:"worktree_dir"`
+	Files       Files         `yaml:"files"`
+	Agents      agent.Markers `yaml:"agents"` // extra agent-detection markers
+}
+
+// Markers returns the built-in agent-detection markers with any configured
+// markers appended (config extends, never replaces, the defaults).
+func (c Config) Markers() agent.Markers {
+	m := agent.Defaults()
+	m.NeedsInput = append(m.NeedsInput, c.Agents.NeedsInput...)
+	m.Working = append(m.Working, c.Agents.Working...)
+	m.Plan = append(m.Plan, c.Agents.Plan...)
+	m.Present = append(m.Present, c.Agents.Present...)
+	return m
 }
 
 // Default config used when nothing is on disk.
@@ -63,6 +77,11 @@ func merge(cfg *Config, path string) {
 	if len(in.Files.Symlink) > 0 {
 		cfg.Files.Symlink = in.Files.Symlink
 	}
+	// Agent markers accumulate across config layers (global + per-project).
+	cfg.Agents.NeedsInput = append(cfg.Agents.NeedsInput, in.Agents.NeedsInput...)
+	cfg.Agents.Working = append(cfg.Agents.Working, in.Agents.Working...)
+	cfg.Agents.Plan = append(cfg.Agents.Plan, in.Agents.Plan...)
+	cfg.Agents.Present = append(cfg.Agents.Present, in.Agents.Present...)
 }
 
 // ApplyFiles copies and symlinks the configured globs from repoRoot into
