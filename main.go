@@ -4,7 +4,7 @@
 //
 //	sx          launcher: opens the TUI in a tmux popup, then performs the
 //	            switch-client AFTER the popup closes (reliable context).
-//	sx menu     the Bubble Tea TUI body, run inside `tmux display-popup -E`.
+//	sx menu     the TUI body, run inside `tmux display-popup -E`.
 //	            It writes the chosen session name to $SX_TARGET_FILE and exits;
 //	            it never calls switch-client itself (unreliable inside a popup).
 package main
@@ -16,8 +16,6 @@ import (
 
 	"github.com/m7medVision/sx/internal/tmux"
 	"github.com/m7medVision/sx/internal/ui"
-
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // version is the build version, injected at release time via -ldflags
@@ -98,15 +96,14 @@ func runMenu() {
 		paneDir, _ = os.Getwd()
 	}
 
-	model, err := tea.NewProgram(ui.New(paneDir, resolveVersion()), tea.WithAltScreen()).Run()
+	target, err := ui.Run(paneDir, resolveVersion())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sx:", err)
 		os.Exit(1)
 	}
-
-	if m, ok := model.(ui.Model); ok && m.Target != "" {
+	if target != "" {
 		if f := os.Getenv("SX_TARGET_FILE"); f != "" {
-			_ = os.WriteFile(f, []byte(m.Target+"\n"), 0o600)
+			_ = os.WriteFile(f, []byte(target+"\n"), 0o600)
 		}
 	}
 }
