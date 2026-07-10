@@ -75,6 +75,7 @@ func runLauncher() {
 	env := []string{
 		"SX_PANE_PATH=" + paneDir,
 		"SX_TARGET_FILE=" + targetPath,
+		"SX_CLIENT_SESSION=" + tmux.ClientSession(),
 	}
 	if err := tmux.DisplayPopup(" sx ", env, self+" menu"); err != nil {
 		fmt.Fprintln(os.Stderr, "sx:", err)

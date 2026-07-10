@@ -4,6 +4,7 @@ package ui
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -94,17 +95,72 @@ func newApp(paneDir, version string) *App {
 	}
 	markers := config.Load(repoRoot).Markers()
 	sessions := tmux.ListSessions()
+	attached, cursor := resolveFocus(sessions, paneDir)
 	return &App{
 		mode:     modeList,
 		paneDir:  paneDir,
 		inRepo:   inRepo,
 		repoRoot: repoRoot,
-		attached: tmux.ClientSession(),
+		attached: attached,
 		sessions: sessions,
+		cursor:   cursor,
 		markers:  markers,
 		states:   detectStates(sessions, markers),
 		version:  version,
 	}
+}
+
+// resolveFocus finds the attached session and the list index to land the cursor
+// on: the previous session in list order (wrap to last). Enter then switches
+// away without moving the cursor first.
+//
+// Attached is resolved by, in order:
+//  1. SX_CLIENT_SESSION from the launcher (set outside the popup — reliable)
+//  2. tmux #{client_session} queried from this process
+//  3. session whose pane path matches the launching pane's directory
+func resolveFocus(sessions []tmux.Session, paneDir string) (attached string, cursor int) {
+	if len(sessions) == 0 {
+		return "", 0
+	}
+
+	attIdx := -1
+	candidates := []string{
+		os.Getenv("SX_CLIENT_SESSION"),
+		tmux.ClientSession(),
+	}
+	for _, cand := range candidates {
+		if cand == "" {
+			continue
+		}
+		for i, s := range sessions {
+			if s.Name == cand {
+				attached, attIdx = cand, i
+				break
+			}
+		}
+		if attIdx >= 0 {
+			break
+		}
+	}
+	if attIdx < 0 && paneDir != "" {
+		for i, s := range sessions {
+			if s.Path == paneDir {
+				attached, attIdx = s.Name, i
+				break
+			}
+		}
+	}
+	if attIdx < 0 {
+		// Unknown attached — keep cursor on first; attached label empty.
+		return "", 0
+	}
+
+	// Previous session, wrap around.
+	cursor = attIdx - 1
+	if cursor < 0 {
+		cursor = len(sessions) - 1
+	}
+	return attached, cursor
 }
 
 func detectStates(sessions []tmux.Session, markers agent.Markers) map[string]agent.State {
@@ -227,14 +283,15 @@ func (a *App) layoutList(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
 			}
 			fmt.Fprintln(list, line)
 		}
-		_ = list.SetCursor(0, a.cursor)
-		ox, oy := list.Origin()
+		// Clear() resets the cursor; re-apply after writing lines.
+		// gocui Highlight compares cy to *screen* y (after origin), not buffer y.
 		_, h := list.Size()
-		if a.cursor < oy {
-			_ = list.SetOrigin(ox, a.cursor)
-		} else if a.cursor >= oy+h {
-			_ = list.SetOrigin(ox, a.cursor-h+1)
+		oy := 0
+		if a.cursor >= h {
+			oy = a.cursor - h + 1
 		}
+		_ = list.SetOrigin(0, oy)
+		_ = list.SetCursorUnrestricted(0, a.cursor-oy)
 	}
 	if _, err := g.SetCurrentView("list"); err != nil {
 		return err
