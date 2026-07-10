@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/m7medVision/sx/internal/agent"
@@ -16,7 +17,10 @@ import (
 	"github.com/m7medVision/sx/internal/update"
 
 	"github.com/awesome-gocui/gocui"
+	"github.com/mattn/go-runewidth"
 )
+
+const previewPollInterval = 500 * time.Millisecond
 
 type mode int
 
@@ -60,11 +64,21 @@ type App struct {
 	version      string
 	updateLatest string
 	updateAvail  bool
+
+	// Preview: cache, window label, and user toggle (p).
+	previewOn        bool
+	previewCacheName string
+	previewCache     string
+	previewWin       string
 }
 
 // Run starts the TUI and returns the chosen session name (may be empty).
 func Run(paneDir, version string) (string, error) {
-	g, err := gocui.NewGui(gocui.OutputNormal, true)
+	// OutputTrue keeps 24-bit colors from agent UIs (opencode/Claude).
+	g, err := gocui.NewGui(gocui.OutputTrue, true)
+	if err != nil {
+		g, err = gocui.NewGui(gocui.Output256, true)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -80,6 +94,7 @@ func Run(paneDir, version string) (string, error) {
 	}
 
 	go app.checkUpdate(g)
+	go app.pollPreview(g)
 
 	if err := g.MainLoop(); err != nil && !errors.Is(err, gocui.ErrQuit) {
 		return app.Target, err
@@ -97,16 +112,17 @@ func newApp(paneDir, version string) *App {
 	sessions := tmux.ListSessions()
 	attached, cursor := resolveFocus(sessions, paneDir)
 	return &App{
-		mode:     modeList,
-		paneDir:  paneDir,
-		inRepo:   inRepo,
-		repoRoot: repoRoot,
-		attached: attached,
-		sessions: sessions,
-		cursor:   cursor,
-		markers:  markers,
-		states:   detectStates(sessions, markers),
-		version:  version,
+		mode:      modeList,
+		paneDir:   paneDir,
+		inRepo:    inRepo,
+		repoRoot:  repoRoot,
+		attached:  attached,
+		sessions:  sessions,
+		cursor:    cursor,
+		markers:   markers,
+		states:    detectStates(sessions, markers),
+		version:   version,
+		previewOn: true,
 	}
 }
 
@@ -180,6 +196,42 @@ func (a *App) checkUpdate(g *gocui.Gui) {
 	})
 }
 
+// pollPreview refreshes the focused session's capture while the list is open so
+// the preview feels live without keypresses.
+func (a *App) pollPreview(g *gocui.Gui) {
+	t := time.NewTicker(previewPollInterval)
+	defer t.Stop()
+	for range t.C {
+		g.Update(func(g *gocui.Gui) error {
+			if a.mode != modeList || !a.previewOn || len(a.sessions) == 0 {
+				return nil
+			}
+			a.refreshPreview(true)
+			return nil
+		})
+	}
+}
+
+// refreshPreview updates the cached capture for the cursor session.
+// force=true always recaptures; force=false only when the session changed.
+func (a *App) refreshPreview(force bool) {
+	if len(a.sessions) == 0 {
+		a.previewCacheName, a.previewCache, a.previewWin = "", "", ""
+		return
+	}
+	name := a.sessions[a.cursor].Name
+	if !force && name == a.previewCacheName {
+		return
+	}
+	a.previewCacheName = name
+	a.previewCache = tmux.CapturePane(name)
+	a.previewWin = tmux.ActiveWindow(name)
+}
+
+func (a *App) invalidatePreview() {
+	a.previewCacheName, a.previewCache, a.previewWin = "", "", ""
+}
+
 // ── layout ──────────────────────────────────────────────────────────
 
 func (a *App) layout(g *gocui.Gui) error {
@@ -245,7 +297,7 @@ func (a *App) setView(g *gocui.Gui, name string, x0, y0, x1, y1 int) error {
 }
 
 func (a *App) layoutList(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
-	showPreview := maxX > 50
+	showPreview := a.previewOn && maxX > 50
 	listRight := maxX - 1
 	if showPreview {
 		listRight = maxX * 45 / 100
@@ -297,22 +349,23 @@ func (a *App) layoutList(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
 		return err
 	}
 
-	if showPreview && len(a.sessions) > 0 {
+	if showPreview && a.previewOn && len(a.sessions) > 0 {
 		if err := a.setView(g, "preview", listRight, top, maxX-1, bodyBottom); err != nil {
 			return err
 		}
 		pv, _ := g.View("preview")
 		pv.Visible = true
-		pv.Title = " preview "
 		pv.Wrap = false
+		a.refreshPreview(false)
+		title := " " + a.sessions[a.cursor].Name + " "
+		if a.previewWin != "" {
+			title = " " + a.sessions[a.cursor].Name + " · " + a.previewWin + " "
+		}
+		pv.Title = title
 		pv.Clear()
 		w, h := pv.Size()
-		raw := tmux.CapturePane(a.sessions[a.cursor].Name)
-		for i, ln := range strings.Split(raw, "\n") {
-			if i >= h {
-				break
-			}
-			fmt.Fprintln(pv, clipDisplay(ln, w))
+		for _, ln := range fitPreview(a.previewCache, w, h) {
+			fmt.Fprintln(pv, ln)
 		}
 	}
 
@@ -423,7 +476,7 @@ func (a *App) openPrompt(seed string) {
 }
 
 func (a *App) listHelp() string {
-	h := " enter: switch   ctrl-n: new   ctrl-x: kill"
+	h := " enter: switch   ctrl-n: new   ctrl-x: kill   p: preview"
 	if a.inRepo {
 		h += "   ctrl-w: worktree"
 	}
@@ -456,38 +509,287 @@ func badge(st agent.State) string {
 	}
 }
 
-// clipDisplay truncates s to at most width display cells.
-func clipDisplay(s string, width int) string {
+// Physical viewport sizes for agent TUIs (source pane rows, before compact).
+const (
+	agentTopRows    = 14 // header / welcome / model / path
+	agentBottomRows = 16 // alerts + prompt + footer
+)
+
+// Markers that mean "this pane is an agent TUI" (matched on full plain text).
+var agentPaneMarkers = []string{
+	"? for shortcuts",
+	"esc interrupt",
+	"esc to interrupt",
+	"ctrl+p commands",
+	"shift+tab to cycle",
+	"claude code",
+	"opencode",
+	"manual mode",
+	"ctrl+c to stop",
+}
+
+// fitPreview turns a full-width pane capture into lines that fit a small
+// in-terminal preview panel (ANSI kept). Agent TUIs are sampled as a mini
+// viewport: top of the screen (header) + bottom (prompt/footer), so middle
+// transcript dump is skipped and idle Claude isn't reduced to one status line.
+func fitPreview(raw string, width, height int) []string {
+	if width < 1 || height < 1 || raw == "" {
+		return nil
+	}
+	rows := strings.Split(raw, "\n")
+	// Drop trailing empty from final newline.
+	if len(rows) > 0 && rows[len(rows)-1] == "" {
+		rows = rows[:len(rows)-1]
+	}
+
+	var selected []string
+	if isAgentPane(raw) {
+		selected = fitAgentViewport(rows, height)
+	} else {
+		selected = fitShellViewport(rows, height)
+	}
+	for i, ln := range selected {
+		selected[i] = truncateANSI(ln, width)
+	}
+	return selected
+}
+
+func isAgentPane(raw string) bool {
+	plain := strings.ToLower(stripANSI(raw))
+	for _, m := range agentPaneMarkers {
+		if strings.Contains(plain, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// fitAgentViewport: compact(top physical rows) + compact(bottom physical rows),
+// then trim to height preferring the bottom (prompt/footer).
+func fitAgentViewport(rows []string, height int) []string {
+	if len(rows) == 0 {
+		return nil
+	}
+	topN := agentTopRows
+	botN := agentBottomRows
+	if topN+botN > len(rows) {
+		// Small pane: just use everything.
+		return compactRows(rows, height)
+	}
+
+	top := compactRows(rows[:topN], height) // may shrink later
+	botStart := len(rows) - botN
+	// Avoid overlapping top and bottom when pane is short (already handled).
+	bot := compactRows(rows[botStart:], height)
+
+	// Prefer bottom if over budget: header can shrink first.
+	out := append(top, bot...)
+	out = dedupeAdjacent(out)
+	if len(out) > height {
+		// Keep as much bottom as possible.
+		keepBot := len(bot)
+		if keepBot > height {
+			keepBot = height
+			bot = bot[len(bot)-keepBot:]
+			return bot
+		}
+		keepTop := height - keepBot
+		if keepTop > len(top) {
+			keepTop = len(top)
+		}
+		if keepTop < 0 {
+			keepTop = 0
+		}
+		out = append(top[len(top)-keepTop:], bot...)
+	}
+	return out
+}
+
+func fitShellViewport(rows []string, height int) []string {
+	return compactRows(rows, height)
+}
+
+// compactRows compacts each line and returns the last max lines of useful text
+// (max <= 0 means no cap).
+func compactRows(rows []string, max int) []string {
+	var out []string
+	for _, ln := range rows {
+		if c := compactLine(ln); c != "" {
+			out = append(out, c)
+		}
+	}
+	if max > 0 && len(out) > max {
+		out = out[len(out)-max:]
+	}
+	return out
+}
+
+func dedupeAdjacent(lines []string) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	out := []string{lines[0]}
+	for i := 1; i < len(lines); i++ {
+		if stripANSI(lines[i]) == stripANSI(out[len(out)-1]) {
+			continue
+		}
+		out = append(out, lines[i])
+	}
+	return out
+}
+
+// compactLine collapses whitespace and drops empty/decoration-only lines,
+// keeping ANSI color sequences intact.
+func compactLine(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	space := false
+	leading := true
+	hasText := false
+
+	for i := 0; i < len(s); {
+		if n := escapeLen(s[i:]); n > 0 {
+			b.WriteString(s[i : i+n])
+			i += n
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			i++
+			continue
+		}
+		if r == ' ' || r == '\t' {
+			if !leading && !space {
+				b.WriteByte(' ')
+				space = true
+			}
+			i += size
+			continue
+		}
+		if leading && isDecorRune(r) {
+			i += size
+			continue
+		}
+		leading = false
+		space = false
+		if !isDecorRune(r) && r != ' ' {
+			hasText = true
+		}
+		b.WriteRune(r)
+		i += size
+	}
+
+	out := strings.TrimRight(b.String(), " \t")
+	// Drop trailing space that isn't part of an escape (TrimRight is fine on
+	// the visible end; escapes rarely trail without text).
+	if !hasText || isDecorOnly(stripANSI(out)) {
+		return ""
+	}
+	return out
+}
+
+// truncateANSI cuts s to at most width display cells, keeping escape sequences
+// that appear before the cut and appending a reset so colors don't leak.
+func truncateANSI(s string, width int) string {
 	if width < 1 {
 		return ""
 	}
-	if displayWidth(s) <= width {
+	if runewidth.StringWidth(stripANSI(s)) <= width {
 		return s
 	}
-	plain := stripANSI(s)
-	r := []rune(plain)
-	if len(r) <= width {
-		return plain
+	var b strings.Builder
+	w := 0
+	for i := 0; i < len(s); {
+		if n := escapeLen(s[i:]); n > 0 {
+			b.WriteString(s[i : i+n])
+			i += n
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		rw := runewidth.RuneWidth(r)
+		if w+rw > width {
+			break
+		}
+		b.WriteString(s[i : i+size])
+		w += rw
+		i += size
 	}
-	return string(r[:width])
+	b.WriteString("\x1b[0m")
+	return b.String()
 }
 
-func displayWidth(s string) int {
-	return utf8.RuneCountInString(stripANSI(s))
+// escapeLen returns the byte length of an ANSI escape at the start of s, or 0.
+func escapeLen(s string) int {
+	if len(s) < 2 || s[0] != '\x1b' {
+		return 0
+	}
+	switch s[1] {
+	case '[': // CSI
+		i := 2
+		for i < len(s) && (s[i] < 0x40 || s[i] > 0x7e) {
+			i++
+		}
+		if i < len(s) {
+			return i + 1
+		}
+		return len(s)
+	case ']': // OSC
+		i := 2
+		for i < len(s) {
+			if s[i] == 0x07 {
+				return i + 1
+			}
+			if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '\\' {
+				return i + 2
+			}
+			i++
+		}
+		return len(s)
+	default:
+		// Other ESC sequences (e.g. ESC ( B) — take ESC + next byte if present.
+		if len(s) >= 2 {
+			return 2
+		}
+		return 1
+	}
+}
+
+func isDecorRune(r rune) bool {
+	switch {
+	case r == '·' || r == '•' || r == '▣' || r == '▪' || r == '▫' ||
+		r == '■' || r == '□' || r == '◆' || r == '◇' || r == '●' ||
+		r == '○' || r == '◉' || r == '⬝':
+		return true
+	case r >= 0x2500 && r <= 0x257F:
+		return true
+	case r >= 0x2580 && r <= 0x259F:
+		return true
+	case r >= 0x2800 && r <= 0x28FF:
+		return true
+	default:
+		return false
+	}
+}
+
+func isDecorOnly(s string) bool {
+	for _, r := range s {
+		if r != ' ' && !isDecorRune(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func stripANSI(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
-			i += 2
-			for i < len(s) && (s[i] < 0x40 || s[i] > 0x7e) {
-				i++
-			}
+	for i := 0; i < len(s); {
+		if n := escapeLen(s[i:]); n > 0 {
+			i += n
 			continue
 		}
 		b.WriteByte(s[i])
+		i++
 	}
 	return b.String()
 }
@@ -518,7 +820,7 @@ func (a *App) bindKeys(g *gocui.Gui) error {
 		}
 	}
 
-	// Letters only on non-editable views so prompts can type j/k/y/n/q.
+	// Letters only on non-editable views so prompts can type j/k/y/n/q/p.
 	for _, view := range []string{"list", "confirm"} {
 		for _, pair := range []struct {
 			key interface{}
@@ -531,6 +833,7 @@ func (a *App) bindKeys(g *gocui.Gui) error {
 			{'Y', a.onYes},
 			{'n', a.onNo},
 			{'N', a.onNo},
+			{'p', a.onTogglePreview},
 		} {
 			if err := g.SetKeybinding(view, pair.key, gocui.ModNone, pair.fn); err != nil {
 				return err
@@ -539,6 +842,19 @@ func (a *App) bindKeys(g *gocui.Gui) error {
 	}
 	return nil
 }
+
+func (a *App) onTogglePreview(g *gocui.Gui, v *gocui.View) error {
+	if a.mode != modeList {
+		return nil
+	}
+	a.previewOn = !a.previewOn
+	if a.previewOn {
+		a.invalidatePreview()
+	}
+	return nil
+}
+
+
 
 func (a *App) onQuitOrBack(g *gocui.Gui, v *gocui.View) error {
 	switch a.mode {
@@ -557,6 +873,7 @@ func (a *App) onUp(g *gocui.Gui, v *gocui.View) error {
 	case modeList:
 		if a.cursor > 0 {
 			a.cursor--
+			a.refreshPreview(false)
 		}
 	case modeBranchPick:
 		if a.bcursor > 0 {
@@ -571,6 +888,7 @@ func (a *App) onDown(g *gocui.Gui, v *gocui.View) error {
 	case modeList:
 		if a.cursor < len(a.sessions)-1 {
 			a.cursor++
+			a.refreshPreview(false)
 		}
 	case modeBranchPick:
 		if a.bcursor < len(a.filtered)-1 {
@@ -731,6 +1049,7 @@ func (a *App) doKill(sess tmux.Session, removeWt bool, wtRoot string) {
 	if a.cursor >= len(a.sessions) {
 		a.cursor = max(0, len(a.sessions)-1)
 	}
+	a.invalidatePreview()
 	a.mode = modeList
 }
 

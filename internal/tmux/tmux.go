@@ -34,12 +34,17 @@ func ListSessions() []Session {
 	return sessions
 }
 
-// CapturePane returns a colored snapshot of the session's active pane, used as
-// live preview content. -e keeps ANSI styling; -p writes to stdout. The
-// -t <session> target resolves to the active pane of the session's current
-// window.
+// CapturePane returns a colored snapshot of the session's active pane for the
+// live preview (-e keeps ANSI; -p writes to stdout). The UI compacts wide
+// agent panes while preserving colors.
 func CapturePane(session string) string {
 	out, _ := run("capture-pane", "-ep", "-t", session)
+	return out
+}
+
+// ActiveWindow returns the name of the session's current window, or "".
+func ActiveWindow(session string) string {
+	out, _ := run("display", "-t", session, "-p", "#{window_name}")
 	return out
 }
 
