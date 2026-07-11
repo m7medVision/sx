@@ -546,7 +546,7 @@ func fitPreview(raw string, width, height int) []string {
 	if isAgentPane(raw) {
 		selected = fitAgentViewport(rows, height)
 	} else {
-		selected = fitShellViewport(rows, height)
+		selected = tailRows(rows, height)
 	}
 	for i, ln := range selected {
 		selected[i] = truncateANSI(ln, width)
@@ -564,8 +564,9 @@ func isAgentPane(raw string) bool {
 	return false
 }
 
-// fitAgentViewport: compact(top physical rows) + compact(bottom physical rows),
-// then trim to height preferring the bottom (prompt/footer).
+// fitAgentViewport: top physical rows (header/welcome/model/path) + bottom
+// physical rows (prompt/footer), with the middle transcript dropped. Rows are
+// kept verbatim — only the width truncation happens later in fitPreview.
 func fitAgentViewport(rows []string, height int) []string {
 	if len(rows) == 0 {
 		return nil
@@ -574,19 +575,16 @@ func fitAgentViewport(rows []string, height int) []string {
 	botN := agentBottomRows
 	if topN+botN > len(rows) {
 		// Small pane: just use everything.
-		return compactRows(rows, height)
+		return tailRows(rows, height)
 	}
 
-	top := compactRows(rows[:topN], height) // may shrink later
-	botStart := len(rows) - botN
-	// Avoid overlapping top and bottom when pane is short (already handled).
-	bot := compactRows(rows[botStart:], height)
+	top := append([]string{}, rows[:topN]...)
+	bot := append([]string{}, rows[len(rows)-botN:]...)
 
-	// Prefer bottom if over budget: header can shrink first.
 	out := append(top, bot...)
 	out = dedupeAdjacent(out)
 	if len(out) > height {
-		// Keep as much bottom as possible.
+		// Prefer bottom if over budget: header can shrink first.
 		keepBot := len(bot)
 		if keepBot > height {
 			keepBot = height
@@ -605,23 +603,14 @@ func fitAgentViewport(rows []string, height int) []string {
 	return out
 }
 
-func fitShellViewport(rows []string, height int) []string {
-	return compactRows(rows, height)
-}
-
-// compactRows compacts each line and returns the last max lines of useful text
-// (max <= 0 means no cap).
-func compactRows(rows []string, max int) []string {
-	var out []string
-	for _, ln := range rows {
-		if c := compactLine(ln); c != "" {
-			out = append(out, c)
-		}
+// tailRows returns the last height rows of a captured pane verbatim (ANSI
+// preserved, only truncated to fit the panel width by the caller). The cursor
+// sits at the bottom of a pane, so this is the slice the user wants to see.
+func tailRows(rows []string, height int) []string {
+	if height > 0 && len(rows) > height {
+		rows = rows[len(rows)-height:]
 	}
-	if max > 0 && len(out) > max {
-		out = out[len(out)-max:]
-	}
-	return out
+	return rows
 }
 
 func dedupeAdjacent(lines []string) []string {
@@ -634,56 +623,6 @@ func dedupeAdjacent(lines []string) []string {
 			continue
 		}
 		out = append(out, lines[i])
-	}
-	return out
-}
-
-// compactLine collapses whitespace and drops empty/decoration-only lines,
-// keeping ANSI color sequences intact.
-func compactLine(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	space := false
-	leading := true
-	hasText := false
-
-	for i := 0; i < len(s); {
-		if n := escapeLen(s[i:]); n > 0 {
-			b.WriteString(s[i : i+n])
-			i += n
-			continue
-		}
-		r, size := utf8.DecodeRuneInString(s[i:])
-		if r == utf8.RuneError && size == 1 {
-			i++
-			continue
-		}
-		if r == ' ' || r == '\t' {
-			if !leading && !space {
-				b.WriteByte(' ')
-				space = true
-			}
-			i += size
-			continue
-		}
-		if leading && isDecorRune(r) {
-			i += size
-			continue
-		}
-		leading = false
-		space = false
-		if !isDecorRune(r) && r != ' ' {
-			hasText = true
-		}
-		b.WriteRune(r)
-		i += size
-	}
-
-	out := strings.TrimRight(b.String(), " \t")
-	// Drop trailing space that isn't part of an escape (TrimRight is fine on
-	// the visible end; escapes rarely trail without text).
-	if !hasText || isDecorOnly(stripANSI(out)) {
-		return ""
 	}
 	return out
 }
@@ -752,32 +691,6 @@ func escapeLen(s string) int {
 		}
 		return 1
 	}
-}
-
-func isDecorRune(r rune) bool {
-	switch {
-	case r == '·' || r == '•' || r == '▣' || r == '▪' || r == '▫' ||
-		r == '■' || r == '□' || r == '◆' || r == '◇' || r == '●' ||
-		r == '○' || r == '◉' || r == '⬝':
-		return true
-	case r >= 0x2500 && r <= 0x257F:
-		return true
-	case r >= 0x2580 && r <= 0x259F:
-		return true
-	case r >= 0x2800 && r <= 0x28FF:
-		return true
-	default:
-		return false
-	}
-}
-
-func isDecorOnly(s string) bool {
-	for _, r := range s {
-		if r != ' ' && !isDecorRune(r) {
-			return false
-		}
-	}
-	return true
 }
 
 func stripANSI(s string) string {
@@ -853,8 +766,6 @@ func (a *App) onTogglePreview(g *gocui.Gui, v *gocui.View) error {
 	}
 	return nil
 }
-
-
 
 func (a *App) onQuitOrBack(g *gocui.Gui, v *gocui.View) error {
 	switch a.mode {

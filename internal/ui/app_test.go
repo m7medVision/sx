@@ -103,3 +103,49 @@ func TestIsAgentPane(t *testing.T) {
 		t.Fatal("expected non-agent")
 	}
 }
+
+// TestFitPreviewLazygitFrame checks that box-drawing frame characters survive
+// for non-agent TUIs (the regression the original compaction broke).
+func TestFitPreviewLazygitFrame(t *testing.T) {
+	// A ~10-row lazygit-style capture with a full box frame.
+	raw := "" +
+		"┌──────────────────────────────┐\n" +
+		"│ Status     Files     Branches │\n" +
+		"├──────────────────────────────┤\n" +
+		"│ app.go      M 3     main      │\n" +
+		"│ ui.go       A 1     feature/x │\n" +
+		"│ ▸ README.md    ??  develop    │\n" +
+		"│                              │\n" +
+		"└──────────────────────────────┘\n" +
+		"Press <esc> to return to menu\n"
+
+	// Width comfortably fits; height via tailRows keeps all of it.
+	got := fitPreview(raw, 40, 20)
+	joined := strings.Join(got, "\n")
+	for _, want := range []string{"┌", "┐", "└", "┘", "├", "┤", "│", "app.go", "README.md", "esc"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("frame/content rune %q missing from preview: %q", want, got)
+		}
+	}
+	// Inner row must keep its spacing, not be space-folded into adjacent cells.
+	if !strings.Contains(got[3], "app.go") {
+		t.Fatalf("inner row mangled: %q", got[3])
+	}
+}
+
+// TestFitPreviewBtopBox exercises multi-column box-drawing layouts.
+func TestFitPreviewBtopBox(t *testing.T) {
+	raw := "" +
+		"┌─────────┐ ┌─────────┐ ┌─────────┐\n" +
+		"│ CPU      │ │ Mem      │ │ Net      │\n" +
+		"│ ████ 23% │ │ ██ 41%   │ │ ▲ 1.2MB  │\n" +
+		"└─────────┘ └─────────┘ └─────────┘\n"
+
+	got := fitPreview(raw, 40, 10)
+	joined := strings.Join(got, "\n")
+	for _, want := range []string{"┌", "┐", "└", "┘", "██", "CPU", "Mem", "Net"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("btop rune %q missing from preview: %q", want, got)
+		}
+	}
+}
