@@ -297,10 +297,10 @@ func (a *App) setView(g *gocui.Gui, name string, x0, y0, x1, y1 int) error {
 }
 
 func (a *App) layoutList(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
-	showPreview := a.previewOn && maxX > 50
+	showPreview := a.previewOn && maxX > 60
 	listRight := maxX - 1
 	if showPreview {
-		listRight = maxX * 45 / 100
+		listRight = maxX * 25 / 100
 		if listRight < 20 {
 			listRight = 20
 		}

@@ -95,7 +95,7 @@ func PaneCurrentPath() string {
 // DisplayPopup runs `tmux display-popup -E` with the given env and command,
 // blocking until the popup closes. env entries are "KEY=value".
 func DisplayPopup(title string, env []string, command string) error {
-	args := []string{"display-popup", "-E", "-w", "80%", "-h", "70%", "-b", "rounded", "-T", title}
+	args := []string{"display-popup", "-E", "-w", "95%", "-h", "90%", "-b", "rounded", "-T", title}
 	for _, e := range env {
 		args = append(args, "-e", e)
 	}
