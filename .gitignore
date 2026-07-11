@@ -3,3 +3,6 @@
 
 # Local build artifacts
 /sx
+
+# Per-project sx config created by the in-TUI editor
+/.sx.yaml
