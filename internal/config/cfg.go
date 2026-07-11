@@ -25,6 +25,40 @@ type Config struct {
 	Agents      agent.Markers `yaml:"agents"` // extra agent-detection markers
 }
 
+// Scope identifies which config file is being edited.
+type Scope int
+
+const (
+	GlobalScope Scope = iota
+	ProjectScope
+)
+
+// Values is the user-editable subset of Config used by the TUI config view
+// (worktree_dir + file globs). Agent markers are shown but not edited there.
+type Values struct {
+	WorktreeDir string   `yaml:"worktree_dir"`
+	Copy        []string `yaml:"copy"`
+	Symlink     []string `yaml:"symlink"`
+}
+
+// FromConfig projects the editable fields out of a Config.
+func FromConfig(c Config) Values {
+	return Values{
+		WorktreeDir: c.WorktreeDir,
+		Copy:        append([]string(nil), c.Files.Copy...),
+		Symlink:     append([]string(nil), c.Files.Symlink...),
+	}
+}
+
+// ToConfig merges the editable values back into a base Config (preserving
+// non-editable fields like agent markers).
+func (v Values) ToConfig(base Config) Config {
+	base.WorktreeDir = v.WorktreeDir
+	base.Files.Copy = append([]string(nil), v.Copy...)
+	base.Files.Symlink = append([]string(nil), v.Symlink...)
+	return base
+}
+
 // Markers returns the built-in agent-detection markers with any configured
 // markers appended (config extends, never replaces, the defaults).
 func (c Config) Markers() agent.Markers {
@@ -39,6 +73,52 @@ func (c Config) Markers() agent.Markers {
 // Default config used when nothing is on disk.
 func defaults() Config {
 	return Config{WorktreeDir: ".worktrees"}
+}
+
+// GlobalPath is the path to the global config file.
+func GlobalPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", "sx", "config.yaml"), nil
+}
+
+// ProjectPath is the path to the per-project config (.sx.yaml) at repoRoot.
+func ProjectPath(repoRoot string) string {
+	return filepath.Join(repoRoot, ".sx.yaml")
+}
+
+// LoadScope reads a single config file. A missing file yields defaults rather
+// than an error so callers can edit and save a fresh config.
+func LoadScope(path string) (Config, error) {
+	cfg := defaults()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cfg, nil
+		}
+		return cfg, err
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return cfg, err
+	}
+	if cfg.WorktreeDir == "" {
+		cfg.WorktreeDir = ".worktrees"
+	}
+	return cfg, nil
+}
+
+// SaveScope writes cfg to path as YAML, creating parent dirs as needed.
+func SaveScope(path string, cfg Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
 }
 
 // Load reads the global config (~/.config/sx/config.yaml) then overlays the
