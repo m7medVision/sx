@@ -1,10 +1,4 @@
-// Package agent classifies what an AI coding agent (Claude Code, opencode, pi,
-// …) is doing inside a tmux session, by pattern-matching the session's visible
-// pane text. There is no API to ask an agent its mode, so detection is purely
-// heuristic over the captured screen — and tunable via config.Markers.
-//
-// It only sees the active pane of a session's current window; an agent running
-// in a background window reads as Idle.
+// Package agent classifies AI-agent state from tmux pane text.
 package agent
 
 import "strings"
@@ -13,31 +7,58 @@ import "strings"
 type State int
 
 const (
-	Idle    State = iota // just a shell, no agent detected
-	Waiting              // agent present but paused — your turn (prompt/approval)
-	Working              // agent actively running
-	Plan                 // agent in planning mode
+	Idle State = iota
+	Waiting
+	Working
+	Plan
+	Blocked
+	Completed
 )
 
-// Markers are the lowercase substrings that map pane text to a state. All
-// matching is case-insensitive; callers pass already-merged defaults+overrides.
-type Markers struct {
-	NeedsInput []string `yaml:"needs_input"` // approval / explicit "your turn" prompts
-	Working    []string `yaml:"working"`     // busy / interrupt hints
-	Plan       []string `yaml:"plan"`        // planning-mode indicators
-	Present    []string `yaml:"present"`     // "an agent is on screen" banners/hints
+// Source identifies how an assessment was obtained.
+type Source string
+
+const Heuristic Source = "heuristic"
+
+// Confidence qualifies an assessment for presentation.
+type Confidence string
+
+const (
+	High Confidence = "high"
+	Low  Confidence = "low"
+)
+
+// Coverage reports whether all relevant panes were inspected.
+type Coverage string
+
+const (
+	Complete Coverage = "complete"
+	Partial  Coverage = "partial"
+)
+
+// Assessment is the source-aware agent state attached to a session snapshot.
+type Assessment struct {
+	State      State
+	Source     Source
+	Confidence Confidence
+	Coverage   Coverage
+	Evidence   string
 }
 
-// Defaults are the built-in markers, seeded with the reliable ones. Config
-// extends (never replaces) these lists.
-//
-// Note on Working: Claude Code's *idle* footer still prints "esc to interrupt"
-// (e.g. "auto mode on … · esc to interrupt · …"), so the bare phrase is NOT a
-// busy signal. Only the active spinner shows the parenthesized form ending in
-// "interrupt)" — that's what we match.
+// Markers are the lowercase substrings that map pane text to a state.
+type Markers struct {
+	NeedsInput []string `yaml:"needs_input"`
+	Completed  []string `yaml:"completed"`
+	Working    []string `yaml:"working"`
+	Plan       []string `yaml:"plan"`
+	Present    []string `yaml:"present"`
+}
+
+// Defaults are the built-in reliable markers. Config extends them.
 func Defaults() Markers {
 	return Markers{
 		NeedsInput: []string{"do you want to proceed", "❯ 1.", "│ 1.", "1. yes"},
+		Completed:  []string{"task completed", "all tasks completed", "completed successfully"},
 		Working:    []string{"interrupt)", "esc to interrupt)"},
 		Plan:       []string{"plan mode"},
 		Present: []string{
@@ -47,36 +68,67 @@ func Defaults() Markers {
 	}
 }
 
-// Detect classifies a session from its plain (no-ANSI) captured pane text.
-//
-// Priority — first match wins:
-//  1. NeedsInput  → Waiting   (a paused agent isn't showing its interrupt hint,
-//     so this never collides with Working)
-//  2. Working     → Working
-//  3. Plan        → Plan
-//  4. Present     → Waiting   (agent visible but otherwise quiet ⇒ your turn)
-//  5. none        → Idle
+// Detect preserves the original single-pane classifier API.
 func Detect(paneText string, m Markers) State {
-	text := strings.ToLower(paneText)
-	switch {
-	case containsAny(text, m.NeedsInput):
-		return Waiting
-	case containsAny(text, m.Working):
-		return Working
-	case containsAny(text, m.Plan):
-		return Plan
-	case containsAny(text, m.Present):
-		return Waiting
+	return Assess([]string{paneText}, m, true).State
+}
+
+// Assess combines relevant-pane evidence into a source-aware heuristic.
+func Assess(panes []string, m Markers, complete bool) Assessment {
+	assessment := Assessment{State: Idle, Source: Heuristic, Confidence: High, Coverage: Complete}
+	if !complete {
+		assessment.Confidence, assessment.Coverage = Low, Partial
+	}
+	for _, pane := range panes {
+		state, evidence := classify(strings.ToLower(pane), m)
+		if priority(state) > priority(assessment.State) {
+			assessment.State, assessment.Evidence = state, evidence
+		}
+	}
+	return assessment
+}
+
+// priority makes cross-pane conflict resolution explicit: an actionable block
+// wins over live work, while completion never conceals a prompt elsewhere.
+func priority(state State) int {
+	switch state {
+	case Blocked:
+		return 5
+	case Working:
+		return 4
+	case Plan:
+		return 3
+	case Waiting:
+		return 2
+	case Completed:
+		return 1
 	default:
-		return Idle
+		return 0
 	}
 }
 
-func containsAny(text string, subs []string) bool {
-	for _, s := range subs {
-		if s != "" && strings.Contains(text, strings.ToLower(s)) {
-			return true
+func classify(text string, m Markers) (State, string) {
+	for _, rule := range []struct {
+		state State
+		terms []string
+	}{
+		{Blocked, m.NeedsInput}, {Completed, m.Completed}, {Working, m.Working},
+		{Plan, m.Plan}, {Waiting, m.Present},
+	} {
+		if evidence := matching(text, rule.terms); evidence != "" {
+			return rule.state, evidence
 		}
 	}
-	return false
+	return Idle, ""
+}
+
+func containsAny(text string, subs []string) bool { return matching(text, subs) != "" }
+
+func matching(text string, subs []string) string {
+	for _, s := range subs {
+		if s != "" && strings.Contains(text, strings.ToLower(s)) {
+			return s
+		}
+	}
+	return ""
 }

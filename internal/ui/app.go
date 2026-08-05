@@ -369,7 +369,7 @@ func (a *App) layoutList(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
 			if pad < 0 {
 				pad = 0
 			}
-			line := prefix + s.Name + strings.Repeat(" ", pad) + "  " + badge(s.State)
+			line := prefix + s.Name + strings.Repeat(" ", pad) + "  " + badge(s.Assessment)
 			if s.Name == a.attached {
 				line += " \x1b[90m(attached)\x1b[0m"
 			}
@@ -411,8 +411,10 @@ func (a *App) layoutList(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
 		}
 		pv.Title = title
 		pv.Clear()
+		row := a.sessionInventory.Sessions[a.cursor]
+		fmt.Fprintf(pv, "\x1b[90m%s\x1b[0m\n", assessmentSummary(row.Assessment))
 		w, h := pv.Size()
-		for _, ln := range fitPreview(a.previewCache, w, h) {
+		for _, ln := range fitPreview(a.previewCache, w, h-1) {
 			fmt.Fprintln(pv, ln)
 		}
 	}
@@ -674,17 +676,22 @@ func (a *App) nameColWidth(avail int) int {
 	return col
 }
 
-func badge(st agent.State) string {
-	switch st {
+func badge(assessment agent.Assessment) string {
+	label := "idle"
+	color := "90"
+	switch assessment.State {
+	case agent.Blocked:
+		label, color = "blocked", "31"
+	case agent.Completed:
+		label, color = "completed", "32"
 	case agent.Waiting:
-		return "\x1b[33m● waiting\x1b[0m"
+		label, color = "waiting", "33"
 	case agent.Working:
-		return "\x1b[34m◐ working\x1b[0m"
+		label, color = "working", "34"
 	case agent.Plan:
-		return "\x1b[35m⏸ plan\x1b[0m"
-	default:
-		return "\x1b[90m· idle\x1b[0m"
+		label, color = "plan", "35"
 	}
+	return fmt.Sprintf("\x1b[%sm● %s (%s, %s, %s)\x1b[0m", color, label, assessment.Source, assessment.Confidence, assessment.Coverage)
 }
 
 // Physical viewport sizes for agent TUIs (source pane rows, before compact).
@@ -1755,6 +1762,14 @@ func selectedWorktreeSource(typed string, choices []string, cursor int) string {
 
 // sessionInventorySummary renders optional context compactly so ordinary tmux
 // sessions remain visible even when Git metadata is unavailable.
+func assessmentSummary(assessment agent.Assessment) string {
+	summary := fmt.Sprintf("%s · %s confidence · %s coverage", assessment.Source, assessment.Confidence, assessment.Coverage)
+	if assessment.Evidence != "" {
+		summary += " · evidence: " + assessment.Evidence
+	}
+	return summary
+}
+
 func sessionInventorySummary(row inventory.Session, now time.Time) string {
 	var parts []string
 	if row.HasGitContext {
@@ -1834,8 +1849,9 @@ func (a *App) doKill(sess inventory.Session, removeWt bool, wtRoot string) {
 }
 
 func buildInventory(sessions []tmux.Session, markers agent.Markers) inventory.Snapshot {
-	return inventory.Build(sessions, git.ContextForDir, func(session tmux.Session) agent.State {
-		return agent.Detect(tmux.CapturePlain(session.Name), markers)
+	return inventory.Build(sessions, git.ContextForDir, func(session tmux.Session) agent.Assessment {
+		panes, complete := tmux.CaptureSessionPlain(session.Name)
+		return agent.Assess(panes, markers, complete)
 	})
 }
 

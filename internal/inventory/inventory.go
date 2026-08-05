@@ -20,7 +20,7 @@ type Session struct {
 	Name           string
 	Path           string
 	Activity       time.Time
-	State          agent.State
+	Assessment     agent.Assessment
 	HasGitContext  bool
 	Branch         string
 	Dirty          bool
@@ -29,10 +29,10 @@ type Session struct {
 }
 
 // Build returns a stable snapshot in tmux's session order.
-func Build(sessions []tmux.Session, inspect func(string) (git.Context, error), detect func(tmux.Session) agent.State) Snapshot {
+func Build(sessions []tmux.Session, inspect func(string) (git.Context, error), assess func(tmux.Session) agent.Assessment) Snapshot {
 	rows := make([]Session, 0, len(sessions))
 	for _, session := range sessions {
-		row := Session{Name: session.Name, Path: session.Path, Activity: session.Activity, State: detect(session)}
+		row := Session{Name: session.Name, Path: session.Path, Activity: session.Activity, Assessment: assess(session)}
 		if context, err := inspect(session.Path); err == nil {
 			row.HasGitContext = true
 			row.Branch = context.Branch
