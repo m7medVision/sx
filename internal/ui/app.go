@@ -144,7 +144,7 @@ func newApp(paneDir, version string) *App {
 	}
 	markers := config.Load(repoRoot).Markers()
 	sessions := tmux.ListSessions()
-	sessionInventory := buildInventory(sessions, markers)
+	sessionInventory := buildInventory(markers)
 	attached, cursor := resolveFocus(sessions, paneDir)
 
 	gv, _ := config.LoadScope(mustGlobalPath())
@@ -1764,6 +1764,9 @@ func selectedWorktreeSource(typed string, choices []string, cursor int) string {
 // sessions remain visible even when Git metadata is unavailable.
 func assessmentSummary(assessment agent.Assessment) string {
 	summary := fmt.Sprintf("%s · %s confidence · %s coverage", assessment.Source, assessment.Confidence, assessment.Coverage)
+	if assessment.Summary != "" {
+		summary += " · summary: " + assessment.Summary
+	}
 	if assessment.Evidence != "" {
 		summary += " · evidence: " + assessment.Evidence
 	}
@@ -1839,8 +1842,10 @@ func (a *App) doKill(sess inventory.Session, removeWt bool, wtRoot string) {
 	}
 	if err := tmux.KillSession(sess.Name); err != nil {
 		a.status = "Failed to kill '" + sess.Name + "'."
+	} else if err := agent.DefaultStore().Delete(sess.Name); err != nil {
+		a.status = "Killed '" + sess.Name + "', but could not clear its lifecycle event."
 	}
-	a.sessionInventory = buildInventory(tmux.ListSessions(), a.markers)
+	a.sessionInventory = buildInventory(a.markers)
 	if a.cursor >= len(a.sessionInventory.Sessions) {
 		a.cursor = max(0, len(a.sessionInventory.Sessions)-1)
 	}
@@ -1848,11 +1853,8 @@ func (a *App) doKill(sess inventory.Session, removeWt bool, wtRoot string) {
 	a.mode = modeList
 }
 
-func buildInventory(sessions []tmux.Session, markers agent.Markers) inventory.Snapshot {
-	return inventory.Build(sessions, git.ContextForDir, func(session tmux.Session) agent.Assessment {
-		panes, complete := tmux.CaptureSessionPlain(session.Name)
-		return agent.Assess(panes, markers, complete)
-	})
+func buildInventory(markers agent.Markers) inventory.Snapshot {
+	return inventory.Current(markers)
 }
 
 func (a *App) branchEditor(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) {

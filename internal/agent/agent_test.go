@@ -48,6 +48,25 @@ func TestDetect(t *testing.T) {
 	}
 }
 
+func TestEventAssessmentTakesPrecedenceOverHeuristic(t *testing.T) {
+	heuristic := Assess([]string{"✻ thinking (esc to interrupt)"}, Defaults(), true)
+	event := Event{Session: "api", State: Completed, Summary: "deployed"}
+	got := WithEvent(heuristic, event)
+	if got.State != Completed || got.Source != EventSource || got.Confidence != High || got.Coverage != Complete || got.Summary != "deployed" {
+		t.Fatalf("event assessment = %#v", got)
+	}
+}
+
+func TestParseState(t *testing.T) {
+	state, err := ParseState("working")
+	if err != nil || state != Working {
+		t.Fatalf("ParseState(working) = %v, %v", state, err)
+	}
+	if _, err := ParseState("unknown"); err == nil {
+		t.Fatal("ParseState(unknown) succeeded")
+	}
+}
+
 func TestDetectWorkingBeatsPlan(t *testing.T) {
 	// Agent working while plan mode is on → Working wins (busy is the truth).
 	got := Detect("plan mode on\n✻ thinking (esc to interrupt)", Defaults())
