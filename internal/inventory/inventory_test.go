@@ -23,15 +23,15 @@ func TestBuildPreservesSessionsWhenGitMetadataIsUnavailable(t *testing.T) {
 			return git.Context{}, errors.New("not a repository")
 		}
 		return git.Context{Branch: "feature/inventory", Dirty: false, LinkedWorktree: true, WorktreePath: "/repo"}, nil
-	}, func(session tmux.Session) agent.State {
-		return agent.Waiting
+	}, func(session tmux.Session) agent.Assessment {
+		return agent.Assessment{State: agent.Waiting, Source: agent.Heuristic, Confidence: agent.High, Coverage: agent.Complete}
 	})
 
 	if len(snapshot.Sessions) != 2 {
 		t.Fatalf("session count = %d, want 2", len(snapshot.Sessions))
 	}
 	clean := snapshot.Sessions[0]
-	if clean.Name != "clean" || clean.Branch != "feature/inventory" || clean.Dirty || !clean.LinkedWorktree || clean.WorktreePath != "/repo" || clean.State != agent.Waiting || !clean.Activity.Equal(activity) {
+	if clean.Name != "clean" || clean.Branch != "feature/inventory" || clean.Dirty || !clean.LinkedWorktree || clean.WorktreePath != "/repo" || clean.Assessment.State != agent.Waiting || !clean.Activity.Equal(activity) {
 		t.Fatalf("clean inventory row = %#v", clean)
 	}
 	shell := snapshot.Sessions[1]

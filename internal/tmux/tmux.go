@@ -64,6 +64,28 @@ func CapturePlain(session string) string {
 	return out
 }
 
+// CaptureSessionPlain captures every pane in a session. complete is false when
+// tmux could not enumerate or capture the full session surface.
+func CaptureSessionPlain(session string) (captures []string, complete bool) {
+	out, err := run("list-panes", "-s", "-t", session, "-F", "#{pane_id}")
+	if err != nil || out == "" {
+		return []string{CapturePlain(session)}, false
+	}
+	complete = true
+	for _, pane := range strings.Split(out, "\n") {
+		capture, err := run("capture-pane", "-p", "-t", pane)
+		if err != nil {
+			complete = false
+			continue
+		}
+		captures = append(captures, capture)
+	}
+	if len(captures) == 0 {
+		return []string{CapturePlain(session)}, false
+	}
+	return captures, complete
+}
+
 // HasSession reports whether a session with the given name exists.
 func HasSession(name string) bool {
 	err := exec.Command("tmux", "has-session", "-t", name).Run()
