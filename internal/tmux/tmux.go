@@ -3,7 +3,9 @@ package tmux
 
 import (
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // run executes a tmux command and returns trimmed stdout.
@@ -14,21 +16,27 @@ func run(args ...string) (string, error) {
 
 // Session is a tmux session with a little context for the UI.
 type Session struct {
-	Name string
-	Path string // pane_current_path of the session's active pane
+	Name     string
+	Path     string // pane_current_path of the session's active pane
+	Activity time.Time
 }
 
 // ListSessions returns all tmux sessions (empty slice when there are none).
 func ListSessions() []Session {
-	out, err := run("list-sessions", "-F", "#{session_name}\t#{pane_current_path}")
+	out, err := run("list-sessions", "-F", "#{session_name}\t#{pane_current_path}\t#{session_activity}")
 	if err != nil || out == "" {
 		return nil
 	}
 	var sessions []Session
 	for _, line := range strings.Split(out, "\n") {
-		name, path, _ := strings.Cut(line, "\t")
+		name, rest, _ := strings.Cut(line, "\t")
+		path, activityText, _ := strings.Cut(rest, "\t")
+		activity := time.Time{}
+		if seconds, err := strconv.ParseInt(activityText, 10, 64); err == nil && seconds > 0 {
+			activity = time.Unix(seconds, 0)
+		}
 		if name != "" {
-			sessions = append(sessions, Session{Name: name, Path: path})
+			sessions = append(sessions, Session{Name: name, Path: path, Activity: activity})
 		}
 	}
 	return sessions

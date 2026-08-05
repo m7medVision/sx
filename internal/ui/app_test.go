@@ -3,9 +3,34 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/m7medVision/sx/internal/inventory"
 	"github.com/m7medVision/sx/internal/tmux"
 )
+
+func TestSessionInventorySummaryIncludesGitWorktreeAndActivity(t *testing.T) {
+	row := inventory.Session{
+		Branch:         "feature/inventory",
+		Dirty:          true,
+		LinkedWorktree: true,
+		WorktreePath:   "/repo/.worktrees/inventory",
+		HasGitContext:  true,
+		Activity:       time.Date(2026, 8, 5, 9, 58, 0, 0, time.UTC),
+	}
+	got := sessionInventorySummary(row, time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC))
+	for _, want := range []string{"feature/inventory", "dirty", "worktree", "/repo/.worktrees/inventory", "active 2m ago"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary = %q, missing %q", got, want)
+		}
+	}
+}
+
+func TestSessionInventorySummaryHandlesMissingMetadata(t *testing.T) {
+	if got := sessionInventorySummary(inventory.Session{}, time.Now()); got != "" {
+		t.Fatalf("summary = %q, want empty", got)
+	}
+}
 
 func TestWorktreeSourcePrefersTypedInput(t *testing.T) {
 	if got := selectedWorktreeSource("upstream/feature/x", []string{"main", "origin/feature/x"}, 1); got != "upstream/feature/x" {

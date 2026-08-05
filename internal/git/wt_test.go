@@ -10,6 +10,29 @@ import (
 	"github.com/m7medVision/sx/internal/git"
 )
 
+func TestContextForDirReportsBranchAndDirtyState(t *testing.T) {
+	repo := testRepo(t)
+
+	context, err := git.ContextForDir(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if context.Branch != "main" || context.Dirty || context.LinkedWorktree || context.WorktreePath != repo {
+		t.Fatalf("clean context = %#v", context)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "untracked"), []byte("change"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	context, err = git.ContextForDir(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !context.Dirty {
+		t.Fatalf("dirty context = %#v", context)
+	}
+}
+
 func TestBranchesPreservesRemoteIdentity(t *testing.T) {
 	repo := testRepo(t)
 	runGit(t, repo, "update-ref", "refs/remotes/origin/feature/x", "HEAD")

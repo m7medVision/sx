@@ -14,6 +14,7 @@ import (
 	"github.com/m7medVision/sx/internal/agent"
 	"github.com/m7medVision/sx/internal/config"
 	"github.com/m7medVision/sx/internal/git"
+	"github.com/m7medVision/sx/internal/inventory"
 	"github.com/m7medVision/sx/internal/tmux"
 	"github.com/m7medVision/sx/internal/update"
 
@@ -45,11 +46,10 @@ type App struct {
 	repoRoot string
 	attached string
 
-	sessions []tmux.Session
-	cursor   int
+	sessionInventory inventory.Snapshot
+	cursor           int
 
 	markers agent.Markers
-	states  map[string]agent.State
 
 	// promptSeed is written into the prompt view once after a mode switch.
 	promptSeed   string
@@ -60,7 +60,7 @@ type App struct {
 	bcursor  int
 
 	confirmMsg    string
-	pendingKill   tmux.Session
+	pendingKill   inventory.Session
 	pendingWtRoot string
 
 	status string
@@ -80,20 +80,20 @@ type App struct {
 	cfgGlobal  config.Values
 	cfgProject config.Values
 
-	cfgCursor    int // index into the config rows (0=dir,1=copy,2=symlink)
-	cfgEntry     int // index into the focused list row's entries (copy/symlink)
-	cfgEditSeed  string
+	cfgCursor     int // index into the config rows (0=dir,1=copy,2=symlink)
+	cfgEntry      int // index into the focused list row's entries (copy/symlink)
+	cfgEditSeed   string
 	cfgEditSeeded bool
 
 	// File picker (mini-fzf) for adding copy/symlink entries.
-	cfgPickTarget   int    // 1=copy, 2=symlink
-	cfgPickQuery    string // editable query at top of picker
-	cfgPickFiles    []string // all repo files, relative
-	cfgPickFiltered []int    // indices into cfgPickFiles after fuzzy filter
-	cfgPickCursor   int      // cursor in filtered list
-	cfgPickMarked   map[int]bool
-	cfgPickLoaded   bool
-	cfgPickTruncated bool
+	cfgPickTarget      int      // 1=copy, 2=symlink
+	cfgPickQuery       string   // editable query at top of picker
+	cfgPickFiles       []string // all repo files, relative
+	cfgPickFiltered    []int    // indices into cfgPickFiles after fuzzy filter
+	cfgPickCursor      int      // cursor in filtered list
+	cfgPickMarked      map[int]bool
+	cfgPickLoaded      bool
+	cfgPickTruncated   bool
 	cfgPickLastAdded   int
 	cfgPickLastAddedAt time.Time
 }
@@ -144,6 +144,7 @@ func newApp(paneDir, version string) *App {
 	}
 	markers := config.Load(repoRoot).Markers()
 	sessions := tmux.ListSessions()
+	sessionInventory := buildInventory(sessions, markers)
 	attached, cursor := resolveFocus(sessions, paneDir)
 
 	gv, _ := config.LoadScope(mustGlobalPath())
@@ -152,19 +153,18 @@ func newApp(paneDir, version string) *App {
 	pValues := config.FromConfig(pv)
 
 	return &App{
-		mode:      modeList,
-		paneDir:   paneDir,
-		inRepo:    inRepo,
-		repoRoot:  repoRoot,
-		attached:  attached,
-		sessions:  sessions,
-		cursor:    cursor,
-		markers:   markers,
-		states:    detectStates(sessions, markers),
-		version:   version,
-		previewOn: true,
-		cfgGlobal:  gValues,
-		cfgProject: pValues,
+		mode:             modeList,
+		paneDir:          paneDir,
+		inRepo:           inRepo,
+		repoRoot:         repoRoot,
+		attached:         attached,
+		sessionInventory: sessionInventory,
+		cursor:           cursor,
+		markers:          markers,
+		version:          version,
+		previewOn:        true,
+		cfgGlobal:        gValues,
+		cfgProject:       pValues,
 	}
 }
 
@@ -221,14 +221,6 @@ func resolveFocus(sessions []tmux.Session, paneDir string) (attached string, cur
 	return attached, cursor
 }
 
-func detectStates(sessions []tmux.Session, markers agent.Markers) map[string]agent.State {
-	states := make(map[string]agent.State, len(sessions))
-	for _, s := range sessions {
-		states[s.Name] = agent.Detect(tmux.CapturePlain(s.Name), markers)
-	}
-	return states
-}
-
 func (a *App) checkUpdate(g *gocui.Gui) {
 	latest, newer := update.Check(a.version)
 	g.Update(func(g *gocui.Gui) error {
@@ -245,7 +237,7 @@ func (a *App) pollPreview(g *gocui.Gui) {
 	defer t.Stop()
 	for range t.C {
 		g.Update(func(g *gocui.Gui) error {
-			if a.mode != modeList || !a.previewOn || len(a.sessions) == 0 {
+			if a.mode != modeList || !a.previewOn || len(a.sessionInventory.Sessions) == 0 {
 				return nil
 			}
 			a.refreshPreview(true)
@@ -257,11 +249,11 @@ func (a *App) pollPreview(g *gocui.Gui) {
 // refreshPreview updates the cached capture for the cursor session.
 // force=true always recaptures; force=false only when the session changed.
 func (a *App) refreshPreview(force bool) {
-	if len(a.sessions) == 0 {
+	if len(a.sessionInventory.Sessions) == 0 {
 		a.previewCacheName, a.previewCache, a.previewWin = "", "", ""
 		return
 	}
-	name := a.sessions[a.cursor].Name
+	name := a.sessionInventory.Sessions[a.cursor].Name
 	if !force && name == a.previewCacheName {
 		return
 	}
@@ -364,11 +356,11 @@ func (a *App) layoutList(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
 	list.SelFgColor = gocui.ColorGreen | gocui.AttrBold
 	list.Clear()
 
-	if len(a.sessions) == 0 {
+	if len(a.sessionInventory.Sessions) == 0 {
 		fmt.Fprintln(list, "  (no sessions)")
 	} else {
 		nameCol := a.nameColWidth(listRight - 2)
-		for i, s := range a.sessions {
+		for i, s := range a.sessionInventory.Sessions {
 			prefix := "  "
 			if i == a.cursor {
 				prefix = "› "
@@ -377,27 +369,35 @@ func (a *App) layoutList(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
 			if pad < 0 {
 				pad = 0
 			}
-			line := prefix + s.Name + strings.Repeat(" ", pad) + "  " + badge(a.states[s.Name])
+			line := prefix + s.Name + strings.Repeat(" ", pad) + "  " + badge(s.State)
 			if s.Name == a.attached {
 				line += " \x1b[90m(attached)\x1b[0m"
 			}
 			fmt.Fprintln(list, line)
+			if i < len(a.sessionInventory.Sessions) {
+				if summary := sessionInventorySummary(a.sessionInventory.Sessions[i], time.Now()); summary != "" {
+					fmt.Fprintln(list, "  \x1b[90m"+summary+"\x1b[0m")
+					continue
+				}
+			}
+			fmt.Fprintln(list) // reserve a context row for each session
 		}
 		// Clear() resets the cursor; re-apply after writing lines.
 		// gocui Highlight compares cy to *screen* y (after origin), not buffer y.
 		_, h := list.Size()
+		cursorY := a.cursor * 2
 		oy := 0
-		if a.cursor >= h {
-			oy = a.cursor - h + 1
+		if cursorY >= h {
+			oy = cursorY - h + 1
 		}
 		_ = list.SetOrigin(0, oy)
-		_ = list.SetCursorUnrestricted(0, a.cursor-oy)
+		_ = list.SetCursorUnrestricted(0, cursorY-oy)
 	}
 	if _, err := g.SetCurrentView("list"); err != nil {
 		return err
 	}
 
-	if showPreview && a.previewOn && len(a.sessions) > 0 {
+	if showPreview && a.previewOn && len(a.sessionInventory.Sessions) > 0 {
 		if err := a.setView(g, "preview", listRight, top, maxX-1, bodyBottom); err != nil {
 			return err
 		}
@@ -405,9 +405,9 @@ func (a *App) layoutList(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
 		pv.Visible = true
 		pv.Wrap = false
 		a.refreshPreview(false)
-		title := " " + a.sessions[a.cursor].Name + " "
+		title := " " + a.sessionInventory.Sessions[a.cursor].Name + " "
 		if a.previewWin != "" {
-			title = " " + a.sessions[a.cursor].Name + " · " + a.previewWin + " "
+			title = " " + a.sessionInventory.Sessions[a.cursor].Name + " · " + a.previewWin + " "
 		}
 		pv.Title = title
 		pv.Clear()
@@ -663,7 +663,7 @@ func (a *App) listHelp() string {
 
 func (a *App) nameColWidth(avail int) int {
 	col := 0
-	for _, s := range a.sessions {
+	for _, s := range a.sessionInventory.Sessions {
 		if l := utf8.RuneCountInString(s.Name); l > col {
 			col = l
 		}
@@ -1041,9 +1041,9 @@ func (a *App) onCloseHelp(g *gocui.Gui, v *gocui.View) error {
 func (a *App) cfgRows() []configRow {
 	return []configRow{
 		{
-			label: "worktree_dir",
-			get:   func(v config.Values) string { return v.WorktreeDir },
-			set:   func(v *config.Values, val string) { v.WorktreeDir = val },
+			label:    "worktree_dir",
+			get:      func(v config.Values) string { return v.WorktreeDir },
+			set:      func(v *config.Values, val string) { v.WorktreeDir = val },
 			editable: true,
 		},
 		{
@@ -1474,9 +1474,9 @@ func (a *App) onCfgPickClearMarks(g *gocui.Gui, v *gocui.View) error {
 
 // layoutCfgPick draws the picker as two views:
 //   - cfgpick:      single-line editable query, uses the default editor so
-//                   the visible cursor tracks typed text.
+//     the visible cursor tracks typed text.
 //   - cfgpicklist:  read-only file list with gocui's highlight on the
-//                   current row (cursor position = current file).
+//     current row (cursor position = current file).
 func (a *App) layoutCfgPick(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
 	// Query view (single line, default editor for cursor management).
 	if err := a.setView(g, "cfgpick", 0, top, maxX-1, top); err != nil {
@@ -1615,7 +1615,7 @@ func (a *App) onUp(g *gocui.Gui, v *gocui.View) error {
 func (a *App) onDown(g *gocui.Gui, v *gocui.View) error {
 	switch a.mode {
 	case modeList:
-		if a.cursor < len(a.sessions)-1 {
+		if a.cursor < len(a.sessionInventory.Sessions)-1 {
 			a.cursor++
 			a.refreshPreview(false)
 		}
@@ -1664,8 +1664,8 @@ func (a *App) onCtrlX(g *gocui.Gui, v *gocui.View) error {
 func (a *App) onEnter(g *gocui.Gui, v *gocui.View) error {
 	switch a.mode {
 	case modeList:
-		if len(a.sessions) > 0 {
-			a.Target = a.sessions[a.cursor].Name
+		if len(a.sessionInventory.Sessions) > 0 {
+			a.Target = a.sessionInventory.Sessions[a.cursor].Name
 			return gocui.ErrQuit
 		}
 	case modeNewSession:
@@ -1753,19 +1753,62 @@ func selectedWorktreeSource(typed string, choices []string, cursor int) string {
 	return ""
 }
 
+// sessionInventorySummary renders optional context compactly so ordinary tmux
+// sessions remain visible even when Git metadata is unavailable.
+func sessionInventorySummary(row inventory.Session, now time.Time) string {
+	var parts []string
+	if row.HasGitContext {
+		if row.Branch != "" {
+			parts = append(parts, row.Branch)
+		}
+		if row.Dirty {
+			parts = append(parts, "dirty")
+		} else {
+			parts = append(parts, "clean")
+		}
+		if row.LinkedWorktree {
+			parts = append(parts, "worktree "+row.WorktreePath)
+		} else {
+			parts = append(parts, "repo "+row.WorktreePath)
+		}
+	}
+	if !row.Activity.IsZero() && !now.Before(row.Activity) {
+		elapsed := now.Sub(row.Activity)
+		if elapsed < time.Minute {
+			parts = append(parts, "active now")
+		} else {
+			parts = append(parts, "active "+compactDuration(elapsed)+" ago")
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+func compactDuration(duration time.Duration) string {
+	if duration < time.Minute {
+		return "now"
+	}
+	if duration < time.Hour {
+		return fmt.Sprintf("%dm", int(duration.Minutes()))
+	}
+	if duration < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(duration.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(duration.Hours()/24))
+}
+
 func (a *App) startKill() error {
-	if len(a.sessions) == 0 {
+	if len(a.sessionInventory.Sessions) == 0 {
 		return nil
 	}
-	sess := a.sessions[a.cursor]
+	sess := a.sessionInventory.Sessions[a.cursor]
 	if sess.Name == a.attached {
 		a.status = "Can't kill the session you're attached to — switch away first."
 		return nil
 	}
-	if root, linked := git.IsLinkedWorktree(sess.Path); linked {
+	if sess.LinkedWorktree {
 		a.pendingKill = sess
-		a.pendingWtRoot = root
-		a.confirmMsg = "Remove worktree '" + root + "'? (session is killed either way)"
+		a.pendingWtRoot = sess.WorktreePath
+		a.confirmMsg = "Remove worktree '" + sess.WorktreePath + "'? (session is killed either way)"
 		a.mode = modeConfirm
 		return nil
 	}
@@ -1773,7 +1816,7 @@ func (a *App) startKill() error {
 	return nil
 }
 
-func (a *App) doKill(sess tmux.Session, removeWt bool, wtRoot string) {
+func (a *App) doKill(sess inventory.Session, removeWt bool, wtRoot string) {
 	if removeWt {
 		if err := git.RemoveWorktree(wtRoot, wtRoot); err != nil {
 			a.status = "Worktree has changes — left on disk; remove manually with --force."
@@ -1782,13 +1825,18 @@ func (a *App) doKill(sess tmux.Session, removeWt bool, wtRoot string) {
 	if err := tmux.KillSession(sess.Name); err != nil {
 		a.status = "Failed to kill '" + sess.Name + "'."
 	}
-	a.sessions = tmux.ListSessions()
-	a.states = detectStates(a.sessions, a.markers)
-	if a.cursor >= len(a.sessions) {
-		a.cursor = max(0, len(a.sessions)-1)
+	a.sessionInventory = buildInventory(tmux.ListSessions(), a.markers)
+	if a.cursor >= len(a.sessionInventory.Sessions) {
+		a.cursor = max(0, len(a.sessionInventory.Sessions)-1)
 	}
 	a.invalidatePreview()
 	a.mode = modeList
+}
+
+func buildInventory(sessions []tmux.Session, markers agent.Markers) inventory.Snapshot {
+	return inventory.Build(sessions, git.ContextForDir, func(session tmux.Session) agent.State {
+		return agent.Detect(tmux.CapturePlain(session.Name), markers)
+	})
 }
 
 func (a *App) branchEditor(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) {
