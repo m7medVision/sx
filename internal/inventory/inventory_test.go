@@ -39,3 +39,17 @@ func TestBuildPreservesSessionsWhenGitMetadataIsUnavailable(t *testing.T) {
 		t.Fatalf("missing Git context hid or changed session: %#v", shell)
 	}
 }
+
+func TestOverlayEventsTakesPrecedenceOverHeuristic(t *testing.T) {
+	snapshot := inventory.Snapshot{Sessions: []inventory.Session{{
+		Name:       "api",
+		Assessment: agent.Assessment{State: agent.Working, Source: agent.Heuristic, Confidence: agent.High, Coverage: agent.Complete},
+	}}}
+	got := inventory.OverlayEvents(snapshot, map[string]agent.Event{
+		"api": {Session: "api", State: agent.Completed, Summary: "released"},
+	})
+	assessment := got.Sessions[0].Assessment
+	if assessment.State != agent.Completed || assessment.Source != agent.EventSource || assessment.Summary != "released" {
+		t.Fatalf("assessment = %#v", assessment)
+	}
+}
