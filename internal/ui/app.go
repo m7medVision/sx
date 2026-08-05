@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -38,6 +39,7 @@ const (
 	modeConfig
 	modeConfigEdit
 	modeCfgPick
+	modeReview
 )
 
 // App holds TUI state. Target is the session to switch to after the popup closes.
@@ -66,6 +68,11 @@ type App struct {
 	confirmMsg    string
 	pendingKill   inventory.Session
 	pendingWtRoot string
+
+	// Review is read-only until the developer explicitly switches or launches
+	// their configured external review command.
+	reviewSession inventory.Session
+	review        git.Review
 
 	status string
 	Target string
@@ -308,7 +315,7 @@ func (a *App) layout(g *gocui.Gui) error {
 		return nil
 	}
 
-	for _, name := range []string{"banner", "list", "preview", "prompt", "branches", "confirm", "help", "config", "cfgedit", "cfgpick", "cfgpicklist"} {
+	for _, name := range []string{"banner", "list", "preview", "prompt", "branches", "confirm", "review", "help", "config", "cfgedit", "cfgpick", "cfgpicklist"} {
 		if v, err := g.View(name); err == nil {
 			v.Visible = false
 		}
@@ -346,6 +353,8 @@ func (a *App) layout(g *gocui.Gui) error {
 		return a.layoutBranchPick(g, maxX, top, bodyBottom, maxY)
 	case modeConfirm:
 		return a.layoutConfirm(g, maxX, top, bodyBottom, maxY)
+	case modeReview:
+		return a.layoutReview(g, maxX, top, bodyBottom, maxY)
 	case modeHelp:
 		return a.layoutHelpView(g, maxX, top, bodyBottom, maxY)
 	case modeConfig, modeConfigEdit:
@@ -516,6 +525,38 @@ func (a *App) layoutBranchPick(g *gocui.Gui, maxX, top, bodyBottom, maxY int) er
 	return a.layoutHelp(g, maxX, bodyBottom, maxY, " enter: use selected (or typed name)   esc: back")
 }
 
+func (a *App) layoutReview(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
+	if err := a.setView(g, "review", 0, top, maxX-1, bodyBottom); err != nil {
+		return err
+	}
+	v, _ := g.View("review")
+	v.Visible = true
+	v.Wrap = false
+	v.Title = " linked worktree review · " + a.reviewSession.Name + " "
+	v.Clear()
+	fmt.Fprintf(v, "\x1b[1;33mLINKED WORKTREE\x1b[0m  %s\n", a.reviewSession.WorktreePath)
+	if a.review.IsClean() {
+		fmt.Fprintln(v, "\x1b[90mstatus: clean\x1b[0m")
+	} else {
+		fmt.Fprintln(v, "\x1b[1mstatus:\x1b[0m")
+		fmt.Fprintln(v, a.review.Status)
+	}
+	fmt.Fprintln(v, "\n\x1b[1mdiff from HEAD:\x1b[0m")
+	if strings.TrimSpace(a.review.Diff) == "" {
+		fmt.Fprintln(v, "\x1b[90m(no tracked diff)\x1b[0m")
+	} else {
+		fmt.Fprintln(v, a.review.Diff)
+	}
+	if _, err := g.SetCurrentView("review"); err != nil {
+		return err
+	}
+	help := " enter: switch to this session   esc/q: back (no changes made)"
+	if config.Load(a.repoRoot).ReviewCommand != "" {
+		help += "   e: open configured reviewer"
+	}
+	return a.layoutHelp(g, maxX, bodyBottom, maxY, help)
+}
+
 func (a *App) layoutConfirm(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
 	if err := a.setView(g, "confirm", 0, top, maxX-1, bodyBottom); err != nil {
 		return err
@@ -552,6 +593,7 @@ func (a *App) layoutHelpView(g *gocui.Gui, maxX, top, bodyBottom, maxY int) erro
 		{"ctrl-n", "new plain session (prompts for a name)"},
 		{"ctrl-w", "new git-worktree session (in a git repo)"},
 		{"ctrl-x", "kill the selected session"},
+		{"r", "review the selected linked worktree (status and diff)"},
 		{"up / k", "move selection up"},
 		{"down / j", "move selection down"},
 		{"p", "toggle the preview pane"},
@@ -695,7 +737,7 @@ func (a *App) openPrompt(seed string) {
 }
 
 func (a *App) listHelp() string {
-	h := " enter: visit/switch   n: next attention   a: attention only   ctrl-n: new   ctrl-x: kill   p: preview   ?: help   c: config"
+	h := " enter: visit/switch   r: review linked worktree   n: next attention   a: attention only   ctrl-n: new   ctrl-x: kill   p: preview   ?: help   c: config"
 	if a.inRepo {
 		h += "   ctrl-w: worktree"
 	}
@@ -974,10 +1016,26 @@ func (a *App) bindKeys(g *gocui.Gui) error {
 			{'a', a.onToggleAttentionOnly},
 			{'?', a.onToggleHelp},
 			{'c', a.onToggleConfig},
+			{'r', a.onReview},
 		} {
 			if err := g.SetKeybinding(view, pair.key, gocui.ModNone, pair.fn); err != nil {
 				return err
 			}
+		}
+	}
+
+	// Review actions are intentionally limited to switching or an explicitly
+	// configured external command; this view contains no destructive action.
+	for _, pair := range []struct {
+		key interface{}
+		fn  func(*gocui.Gui, *gocui.View) error
+	}{
+		{gocui.KeyEnter, a.switchReviewedWorktree},
+		{'e', a.openExternalReviewer},
+		{'q', a.onQuitOrBack},
+	} {
+		if err := g.SetKeybinding("review", pair.key, gocui.ModNone, pair.fn); err != nil {
+			return err
 		}
 	}
 
@@ -1635,7 +1693,7 @@ func (a *App) onQuitOrBack(g *gocui.Gui, v *gocui.View) error {
 	switch a.mode {
 	case modeList:
 		return gocui.ErrQuit
-	case modeNewSession, modeBranchPick, modeConfirm:
+	case modeNewSession, modeBranchPick, modeConfirm, modeReview:
 		a.mode = modeList
 		a.status = ""
 		return nil
@@ -1707,6 +1765,67 @@ func (a *App) onCtrlW(g *gocui.Gui, v *gocui.View) error {
 	a.status = ""
 	a.openPrompt("")
 	_ = g.DeleteView("prompt")
+	return nil
+}
+
+func (a *App) onReview(g *gocui.Gui, v *gocui.View) error {
+	return a.startReview()
+}
+
+// startReview opens the review surface only for a selected linked worktree.
+// Ordinary sessions stay distinguishable and retain their normal controls.
+func (a *App) startReview() error {
+	if a.mode != modeList || len(a.sessionInventory.Sessions) == 0 {
+		return nil
+	}
+	session := a.sessionInventory.Sessions[a.cursor]
+	if !session.LinkedWorktree {
+		a.status = "Review is available only for linked worktrees."
+		return nil
+	}
+	review, err := git.ReviewForWorktree(session.WorktreePath)
+	if err != nil {
+		a.status = "Could not inspect linked worktree: " + err.Error()
+		return nil
+	}
+	a.reviewSession = session
+	a.review = review
+	a.status = ""
+	a.mode = modeReview
+	return nil
+}
+
+// switchReviewedWorktree is explicit: it only selects the existing tmux
+// session for the launcher and never changes Git state or removes anything.
+func (a *App) switchReviewedWorktree(g *gocui.Gui, v *gocui.View) error {
+	if a.mode != modeReview || !a.reviewSession.LinkedWorktree {
+		return nil
+	}
+	a.Target = a.reviewSession.Name
+	return gocui.ErrQuit
+}
+
+// openExternalReviewer starts a developer-configured command in the linked
+// worktree. The command is never inferred or run automatically. Its working
+// directory and SX_REVIEW_WORKTREE make the selected path available without
+// interpolating it into shell text.
+func (a *App) openExternalReviewer(g *gocui.Gui, v *gocui.View) error {
+	if a.mode != modeReview || !a.reviewSession.LinkedWorktree {
+		return nil
+	}
+	command := strings.TrimSpace(config.Load(a.repoRoot).ReviewCommand)
+	if command == "" {
+		a.status = "No review_command is configured."
+		return nil
+	}
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Dir = a.reviewSession.WorktreePath
+	cmd.Env = append(os.Environ(), "SX_REVIEW_WORKTREE="+a.reviewSession.WorktreePath)
+	if err := cmd.Start(); err != nil {
+		a.status = "Could not open reviewer: " + err.Error()
+		return nil
+	}
+	a.status = "Opened configured reviewer; no worktree changes were made by sx."
 	return nil
 }
 

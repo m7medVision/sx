@@ -2,6 +2,7 @@
 # Per-project values override global ones.
 
 worktree_dir: .worktrees      # where worktrees are created, relative to repo root
+review_command: code --reuse-window . # optional; runs only when explicitly requested from review
 
 files:
   copy:

@@ -119,6 +119,29 @@ func TestEnsureWorktreeRejectsUnknownSource(t *testing.T) {
 	}
 }
 
+func TestReviewForWorktreeRejectsOrdinaryRepository(t *testing.T) {
+	if _, err := git.ReviewForWorktree(testRepo(t)); err == nil {
+		t.Fatal("ReviewForWorktree accepted an ordinary repository")
+	}
+}
+
+func TestRemoveWorktreeKeepsDirtyWorktreeOnDisk(t *testing.T) {
+	repo := testRepo(t)
+	runGit(t, repo, "branch", "feature")
+	worktree := filepath.Join(repo, "feature")
+	runGit(t, repo, "worktree", "add", worktree, "feature")
+	if err := os.WriteFile(filepath.Join(worktree, "README"), []byte("dirty"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := git.RemoveWorktree(repo, worktree); err == nil {
+		t.Fatal("RemoveWorktree removed a dirty linked worktree")
+	}
+	if _, err := os.Stat(worktree); err != nil {
+		t.Fatalf("dirty worktree was removed: %v", err)
+	}
+}
+
 func testRepo(t *testing.T) string {
 	t.Helper()
 	repo := t.TempDir()

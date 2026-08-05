@@ -25,6 +25,7 @@ Press **`prefix s`** to open it.
 | `ctrl-n` | new plain session (prompts for a name)                     |
 | `ctrl-w` | new git-worktree session (pick or type a branch)           |
 | `ctrl-x` | kill the selected session (asks before removing a worktree)|
+| `r`      | review the selected linked worktree (status and diff)      |
 | `esc`/`q`| cancel                                                     |
 | `?`      | show help                                                  |
 | `c`      | edit config (global + per-project)                         |
@@ -65,6 +66,21 @@ each commit.
 Edits apply to whichever scope is active; the other scope's file is untouched.
 Save writes only the configured fields, so agent-detection markers already in
 the file are preserved.
+
+## Reviewing linked worktrees
+
+Select a linked worktree session and press `r` to inspect its Git status and
+diff from `HEAD`. The review screen labels linked worktrees explicitly; ordinary
+tmux sessions cannot enter it. Press `enter` only when you want to switch to
+that existing session. Review never merges, discards, or removes worktrees.
+
+Optionally configure a review tool. Press `e` on the review screen to launch it
+explicitly in the selected worktree; `SX_REVIEW_WORKTREE` contains that path.
+For example:
+
+```yaml
+review_command: code --reuse-window .
+```
 
 ```yaml
 worktree_dir: .worktrees

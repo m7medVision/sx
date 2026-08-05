@@ -20,9 +20,10 @@ type Files struct {
 
 // Config is the merged sx configuration.
 type Config struct {
-	WorktreeDir string        `yaml:"worktree_dir"`
-	Files       Files         `yaml:"files"`
-	Agents      agent.Markers `yaml:"agents"` // extra agent-detection markers
+	WorktreeDir   string        `yaml:"worktree_dir"`
+	Files         Files         `yaml:"files"`
+	Agents        agent.Markers `yaml:"agents"`         // extra agent-detection markers
+	ReviewCommand string        `yaml:"review_command"` // explicit external review command
 }
 
 // Scope identifies which config file is being edited.
@@ -156,6 +157,9 @@ func merge(cfg *Config, path string) {
 	}
 	if len(in.Files.Symlink) > 0 {
 		cfg.Files.Symlink = in.Files.Symlink
+	}
+	if in.ReviewCommand != "" {
+		cfg.ReviewCommand = in.ReviewCommand
 	}
 	// Agent markers accumulate across config layers (global + per-project).
 	cfg.Agents.NeedsInput = append(cfg.Agents.NeedsInput, in.Agents.NeedsInput...)
