@@ -1710,10 +1710,7 @@ func (a *App) createPlainSession(g *gocui.Gui) error {
 }
 
 func (a *App) createWorktreeSession(g *gocui.Gui) error {
-	branch := strings.TrimSpace(promptBuffer(g))
-	if len(a.filtered) > 0 {
-		branch = a.filtered[a.bcursor]
-	}
+	branch := selectedWorktreeSource(promptBuffer(g), a.filtered, a.bcursor)
 	if branch == "" {
 		a.mode = modeList
 		return nil
@@ -1742,6 +1739,18 @@ func (a *App) createWorktreeSession(g *gocui.Gui) error {
 	}
 	a.Target = sessionName
 	return gocui.ErrQuit
+}
+
+// selectedWorktreeSource gives explicit typed input precedence over the picker.
+// An empty prompt means the highlighted suggestion is the selected source.
+func selectedWorktreeSource(typed string, choices []string, cursor int) string {
+	if typed = strings.TrimSpace(typed); typed != "" {
+		return typed
+	}
+	if cursor >= 0 && cursor < len(choices) {
+		return choices[cursor]
+	}
+	return ""
 }
 
 func (a *App) startKill() error {

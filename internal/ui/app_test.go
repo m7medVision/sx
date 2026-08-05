@@ -7,6 +7,15 @@ import (
 	"github.com/m7medVision/sx/internal/tmux"
 )
 
+func TestWorktreeSourcePrefersTypedInput(t *testing.T) {
+	if got := selectedWorktreeSource("upstream/feature/x", []string{"main", "origin/feature/x"}, 1); got != "upstream/feature/x" {
+		t.Fatalf("selected source = %q", got)
+	}
+	if got := selectedWorktreeSource("  ", []string{"main", "origin/feature/x"}, 1); got != "origin/feature/x" {
+		t.Fatalf("selected source = %q", got)
+	}
+}
+
 func TestResolveFocus(t *testing.T) {
 	sessions := []tmux.Session{
 		{Name: "dotfiles", Path: "/home/u/dotfiles"},
