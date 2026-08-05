@@ -67,6 +67,35 @@ func TestStorePutSerializesConcurrentWrites(t *testing.T) {
 	}
 }
 
+func TestStoreAcknowledgesWithoutDiscardingAttentionEvidence(t *testing.T) {
+	store := Store{Path: filepath.Join(t.TempDir(), "events.json")}
+	if err := store.Put(Event{Session: "api", State: Blocked, Summary: "need approval"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Acknowledge("api"); err != nil {
+		t.Fatal(err)
+	}
+	event := mustEvent(t, store, "api")
+	if !event.Acknowledged || event.Summary != "need approval" || event.At.IsZero() {
+		t.Fatalf("acknowledged event = %#v", event)
+	}
+	if err := store.Put(Event{Session: "api", State: Working, Summary: "resumed"}); err != nil {
+		t.Fatal(err)
+	}
+	if event = mustEvent(t, store, "api"); event.Acknowledged {
+		t.Fatalf("new event must be unread: %#v", event)
+	}
+}
+
+func mustEvent(t *testing.T, store Store, session string) Event {
+	t.Helper()
+	events, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events[session]
+}
+
 func TestStoreDeleteRemovesSessionEvent(t *testing.T) {
 	store := Store{Path: filepath.Join(t.TempDir(), "events.json")}
 	if err := store.Put(Event{Session: "api", State: Completed}); err != nil {

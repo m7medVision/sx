@@ -2,6 +2,7 @@
 package inventory
 
 import (
+	"sort"
 	"time"
 
 	"github.com/m7medVision/sx/internal/agent"
@@ -26,6 +27,19 @@ type Session struct {
 	Dirty          bool             `json:"dirty"`
 	LinkedWorktree bool             `json:"linkedWorktree"`
 	WorktreePath   string           `json:"worktreePath,omitempty"`
+	Attention      *Attention       `json:"attention,omitempty"`
+}
+
+// Attention is the durable evidence behind an unread lifecycle report.
+type Attention struct {
+	Summary      string    `json:"summary,omitempty"`
+	At           time.Time `json:"at"`
+	Acknowledged bool      `json:"acknowledged"`
+}
+
+// NeedsAttention reports whether a session is blocked or has an unread report.
+func (s Session) NeedsAttention() bool {
+	return s.Assessment.State == agent.Blocked || (s.Attention != nil && !s.Attention.Acknowledged)
 }
 
 // Current returns the snapshot shared by the TUI and machine-readable CLI.
@@ -63,7 +77,54 @@ func OverlayEvents(snapshot Snapshot, events map[string]agent.Event) Snapshot {
 	for i := range snapshot.Sessions {
 		if event, ok := events[snapshot.Sessions[i].Name]; ok {
 			snapshot.Sessions[i].Assessment = agent.WithEvent(snapshot.Sessions[i].Assessment, event)
+			snapshot.Sessions[i].Attention = &Attention{Summary: event.Summary, At: event.At, Acknowledged: event.Acknowledged}
 		}
 	}
 	return snapshot
+}
+
+// AttentionFirst returns a stable attention-prioritized view: blocked sessions,
+// then unread reports, then all ordinary sessions in their original order.
+func AttentionFirst(snapshot Snapshot) Snapshot {
+	out := Snapshot{Sessions: append([]Session(nil), snapshot.Sessions...)}
+	sort.SliceStable(out.Sessions, func(i, j int) bool {
+		return attentionRank(out.Sessions[i]) < attentionRank(out.Sessions[j])
+	})
+	return out
+}
+
+// AttentionOnly returns just the sessions requiring developer attention.
+func AttentionOnly(snapshot Snapshot) Snapshot {
+	out := Snapshot{}
+	for _, session := range snapshot.Sessions {
+		if session.NeedsAttention() {
+			out.Sessions = append(out.Sessions, session)
+		}
+	}
+	return AttentionFirst(out)
+}
+
+func attentionRank(session Session) int {
+	if session.Assessment.State == agent.Blocked {
+		return 0
+	}
+	if session.Attention != nil && !session.Attention.Acknowledged {
+		return 1
+	}
+	return 2
+}
+
+// AttentionTransitions identifies sessions that newly need attention.
+func AttentionTransitions(before, after Snapshot) []Session {
+	seen := make(map[string]bool, len(before.Sessions))
+	for _, session := range before.Sessions {
+		seen[session.Name] = session.NeedsAttention()
+	}
+	var transitions []Session
+	for _, session := range after.Sessions {
+		if session.NeedsAttention() && !seen[session.Name] {
+			transitions = append(transitions, session)
+		}
+	}
+	return transitions
 }

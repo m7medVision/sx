@@ -14,10 +14,11 @@ import (
 
 // Event is the latest lifecycle state a supported agent explicitly reported.
 type Event struct {
-	Session string    `json:"session"`
-	State   State     `json:"state"`
-	Summary string    `json:"summary,omitempty"`
-	At      time.Time `json:"at"`
+	Session      string    `json:"session"`
+	State        State     `json:"state"`
+	Summary      string    `json:"summary,omitempty"`
+	At           time.Time `json:"at"`
+	Acknowledged bool      `json:"acknowledged"`
 }
 
 // Store persists the latest reported event for every session.
@@ -77,7 +78,32 @@ func (s Store) Put(event Event) error {
 		if err != nil {
 			return err
 		}
+		// A new report is always unread, including when it updates a previously
+		// acknowledged lifecycle record.
+		event.Acknowledged = false
 		events[event.Session] = event
+		return s.write(events)
+	})
+}
+
+// Acknowledge marks a lifecycle record read without discarding its summary or
+// timestamp. It is intentionally separate from Put so only a visit can read it.
+func (s Store) Acknowledge(session string) error {
+	session = strings.TrimSpace(session)
+	if session == "" {
+		return errors.New("session is required")
+	}
+	return s.withLock(func() error {
+		events, err := s.Load()
+		if err != nil {
+			return err
+		}
+		event, ok := events[session]
+		if !ok || event.Acknowledged {
+			return nil
+		}
+		event.Acknowledged = true
+		events[session] = event
 		return s.write(events)
 	})
 }
