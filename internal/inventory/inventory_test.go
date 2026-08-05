@@ -40,6 +40,38 @@ func TestBuildPreservesSessionsWhenGitMetadataIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestAttentionViewsPrioritizeBlockedThenUnreadAndRetainEvidence(t *testing.T) {
+	at := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
+	snapshot := inventory.Snapshot{Sessions: []inventory.Session{
+		{Name: "ordinary", Assessment: agent.Assessment{State: agent.Working}},
+		{Name: "unread", Assessment: agent.Assessment{State: agent.Completed}, Attention: &inventory.Attention{Summary: "done", At: at}},
+		{Name: "blocked", Assessment: agent.Assessment{State: agent.Blocked}, Attention: &inventory.Attention{Summary: "approve", At: at, Acknowledged: true}},
+	}}
+	ordered := inventory.AttentionFirst(snapshot)
+	for i, want := range []string{"blocked", "unread", "ordinary"} {
+		if ordered.Sessions[i].Name != want {
+			t.Fatalf("ordered[%d] = %q, want %q", i, ordered.Sessions[i].Name, want)
+		}
+	}
+	only := inventory.AttentionOnly(snapshot)
+	if len(only.Sessions) != 2 || only.Sessions[1].Attention.Summary != "done" || !only.Sessions[1].Attention.At.Equal(at) {
+		t.Fatalf("attention view = %#v", only.Sessions)
+	}
+}
+
+func TestAttentionTransitionsAndFallbackBlockedState(t *testing.T) {
+	before := inventory.Snapshot{Sessions: []inventory.Session{{Name: "api", Assessment: agent.Assessment{State: agent.Working}}}}
+	after := inventory.OverlayEvents(inventory.Snapshot{Sessions: []inventory.Session{{Name: "api", Assessment: agent.Assessment{State: agent.Blocked, Source: agent.Heuristic}}}}, map[string]agent.Event{
+		"api": {Session: "api", State: agent.Working, Summary: "still running", At: time.Now()},
+	})
+	if after.Sessions[0].Assessment.State != agent.Blocked {
+		t.Fatalf("fallback block was lost: %#v", after.Sessions[0].Assessment)
+	}
+	if transitions := inventory.AttentionTransitions(before, after); len(transitions) != 1 || transitions[0].Name != "api" {
+		t.Fatalf("transitions = %#v", transitions)
+	}
+}
+
 func TestOverlayEventsTakesPrecedenceOverHeuristic(t *testing.T) {
 	snapshot := inventory.Snapshot{Sessions: []inventory.Session{{
 		Name:       "api",

@@ -144,6 +144,12 @@ func Assess(panes []string, m Markers, complete bool) Assessment {
 
 // WithEvent replaces a heuristic assessment with a reported lifecycle event.
 func WithEvent(fallback Assessment, event Event) Assessment {
+	// A pane prompt is still actionable even when an agent has not emitted its
+	// matching lifecycle event yet. Preserve that safety-net over a stale
+	// non-blocked event; explicit reports otherwise remain authoritative.
+	if fallback.State == Blocked && event.State != Blocked {
+		return fallback
+	}
 	return Assessment{State: event.State, Source: EventSource, Confidence: High, Coverage: Complete, Summary: event.Summary}
 }
 

@@ -1,12 +1,16 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/m7medVision/sx/internal/agent"
 	"github.com/m7medVision/sx/internal/inventory"
 	"github.com/m7medVision/sx/internal/tmux"
+
+	"github.com/awesome-gocui/gocui"
 )
 
 func TestSessionInventorySummaryIncludesGitWorktreeAndActivity(t *testing.T) {
@@ -51,6 +55,53 @@ func TestResolveFocus(t *testing.T) {
 	name, cur := resolveFocus(sessions, "")
 	if name != "manara-dev" || cur != 0 {
 		t.Fatalf("got %q @ %d", name, cur)
+	}
+}
+
+func TestNextAttentionWrapsAndSkipsOrdinarySessions(t *testing.T) {
+	app := &App{cursor: 1, sessionInventory: inventory.Snapshot{Sessions: []inventory.Session{
+		{Name: "blocked", Assessment: agent.Assessment{State: agent.Blocked}},
+		{Name: "ordinary", Assessment: agent.Assessment{State: agent.Working}},
+		{Name: "unread", Attention: &inventory.Attention{}},
+	}}}
+	if err := app.nextAttention(); err != nil {
+		t.Fatal(err)
+	}
+	if app.cursor != 2 {
+		t.Fatalf("cursor = %d, want unread session", app.cursor)
+	}
+	if err := app.nextAttention(); err != nil {
+		t.Fatal(err)
+	}
+	if app.cursor != 0 {
+		t.Fatalf("cursor = %d, want wrapped blocked session", app.cursor)
+	}
+}
+
+func TestVisitingSessionAcknowledgesItsLifecycleRecord(t *testing.T) {
+	path := t.TempDir() + "/events.json"
+	t.Setenv("SX_AGENT_EVENT_STORE", path)
+	store := agent.Store{Path: path}
+	if err := store.Put(agent.Event{Session: "api", State: agent.Completed, Summary: "done"}); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{mode: modeList, sessionInventory: inventory.Snapshot{Sessions: []inventory.Session{{Name: "api"}}}}
+	if err := app.onEnter(nil, nil); !errors.Is(err, gocui.ErrQuit) {
+		t.Fatalf("onEnter error = %v", err)
+	}
+	events, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !events["api"].Acknowledged || events["api"].Summary != "done" {
+		t.Fatalf("event = %#v", events["api"])
+	}
+}
+
+func TestSessionInventorySummaryShowsUnreadAttentionTime(t *testing.T) {
+	row := inventory.Session{Attention: &inventory.Attention{At: time.Date(2026, 8, 5, 9, 58, 0, 0, time.UTC)}}
+	if got := sessionInventorySummary(row, time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)); !strings.Contains(got, "attention unread 2m ago") {
+		t.Fatalf("summary = %q", got)
 	}
 }
 

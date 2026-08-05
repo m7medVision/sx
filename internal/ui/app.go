@@ -22,7 +22,10 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-const previewPollInterval = 500 * time.Millisecond
+const (
+	previewPollInterval   = 500 * time.Millisecond
+	attentionPollInterval = 2 * time.Second
+)
 
 type mode int
 
@@ -48,6 +51,7 @@ type App struct {
 
 	sessionInventory inventory.Snapshot
 	cursor           int
+	attentionOnly    bool
 
 	markers agent.Markers
 
@@ -129,6 +133,7 @@ func Run(paneDir, version string) (string, error) {
 
 	go app.checkUpdate(g)
 	go app.pollPreview(g)
+	go app.pollAttention(g)
 
 	if err := g.MainLoop(); err != nil && !errors.Is(err, gocui.ErrQuit) {
 		return app.Target, err
@@ -144,8 +149,13 @@ func newApp(paneDir, version string) *App {
 	}
 	markers := config.Load(repoRoot).Markers()
 	sessions := tmux.ListSessions()
-	sessionInventory := buildInventory(markers)
-	attached, cursor := resolveFocus(sessions, paneDir)
+	sessionInventory := inventory.AttentionFirst(buildInventory(markers))
+	attached, originalCursor := resolveFocus(sessions, paneDir)
+	selected := ""
+	if originalCursor >= 0 && originalCursor < len(sessions) {
+		selected = sessions[originalCursor].Name
+	}
+	cursor := cursorForSession(sessionInventory, selected)
 
 	gv, _ := config.LoadScope(mustGlobalPath())
 	pv, _ := config.LoadScope(config.ProjectPath(repoRoot))
@@ -232,6 +242,15 @@ func (a *App) checkUpdate(g *gocui.Gui) {
 
 // pollPreview refreshes the focused session's capture while the list is open so
 // the preview feels live without keypresses.
+func cursorForSession(snapshot inventory.Snapshot, name string) int {
+	for i, session := range snapshot.Sessions {
+		if session.Name == name {
+			return i
+		}
+	}
+	return 0
+}
+
 func (a *App) pollPreview(g *gocui.Gui) {
 	t := time.NewTicker(previewPollInterval)
 	defer t.Stop()
@@ -241,6 +260,21 @@ func (a *App) pollPreview(g *gocui.Gui) {
 				return nil
 			}
 			a.refreshPreview(true)
+			return nil
+		})
+	}
+}
+
+// pollAttention detects reports and fallback state transitions while the menu
+// is open, preserving the selected session when the attention-first order moves.
+func (a *App) pollAttention(g *gocui.Gui) {
+	t := time.NewTicker(attentionPollInterval)
+	defer t.Stop()
+	for range t.C {
+		g.Update(func(g *gocui.Gui) error {
+			if a.mode == modeList {
+				a.refreshInventory(true)
+			}
 			return nil
 		})
 	}
@@ -352,6 +386,9 @@ func (a *App) layoutList(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
 	list, _ := g.View("list")
 	list.Visible = true
 	list.Title = " tmux sessions "
+	if a.attentionOnly {
+		list.Title = " tmux sessions · attention "
+	}
 	list.Highlight = true
 	list.SelFgColor = gocui.ColorGreen | gocui.AttrBold
 	list.Clear()
@@ -518,6 +555,8 @@ func (a *App) layoutHelpView(g *gocui.Gui, maxX, top, bodyBottom, maxY int) erro
 		{"up / k", "move selection up"},
 		{"down / j", "move selection down"},
 		{"p", "toggle the preview pane"},
+		{"a", "show only sessions needing attention"},
+		{"n", "select the next session needing attention"},
 		{"?", "close this help"},
 		{"q / esc", "close this help / cancel"},
 	}
@@ -656,7 +695,7 @@ func (a *App) openPrompt(seed string) {
 }
 
 func (a *App) listHelp() string {
-	h := " enter: switch   ctrl-n: new   ctrl-x: kill   p: preview   ?: help   c: config"
+	h := " enter: visit/switch   n: next attention   a: attention only   ctrl-n: new   ctrl-x: kill   p: preview   ?: help   c: config"
 	if a.inRepo {
 		h += "   ctrl-w: worktree"
 	}
@@ -932,6 +971,7 @@ func (a *App) bindKeys(g *gocui.Gui) error {
 			{'n', a.onNo},
 			{'N', a.onNo},
 			{'p', a.onTogglePreview},
+			{'a', a.onToggleAttentionOnly},
 			{'?', a.onToggleHelp},
 			{'c', a.onToggleConfig},
 		} {
@@ -1014,6 +1054,15 @@ func (a *App) bindKeys(g *gocui.Gui) error {
 			return err
 		}
 	}
+	return nil
+}
+
+func (a *App) onToggleAttentionOnly(g *gocui.Gui, v *gocui.View) error {
+	if a.mode != modeList {
+		return nil
+	}
+	a.attentionOnly = !a.attentionOnly
+	a.refreshInventory(false)
 	return nil
 }
 
@@ -1673,6 +1722,10 @@ func (a *App) onEnter(g *gocui.Gui, v *gocui.View) error {
 	case modeList:
 		if len(a.sessionInventory.Sessions) > 0 {
 			a.Target = a.sessionInventory.Sessions[a.cursor].Name
+			if err := agent.DefaultStore().Acknowledge(a.Target); err != nil {
+				a.status = "Could not acknowledge attention: " + err.Error()
+				return nil
+			}
 			return gocui.ErrQuit
 		}
 	case modeNewSession:
@@ -1692,10 +1745,31 @@ func (a *App) onYes(g *gocui.Gui, v *gocui.View) error {
 }
 
 func (a *App) onNo(g *gocui.Gui, v *gocui.View) error {
-	if a.mode != modeConfirm {
-		return nil
+	if a.mode == modeList {
+		return a.nextAttention()
 	}
-	a.doKill(a.pendingKill, false, "")
+	if a.mode == modeConfirm {
+		a.doKill(a.pendingKill, false, "")
+	}
+	return nil
+}
+
+func (a *App) nextAttention() error {
+	for i := a.cursor + 1; i < len(a.sessionInventory.Sessions); i++ {
+		if a.sessionInventory.Sessions[i].NeedsAttention() {
+			a.cursor = i
+			a.refreshPreview(false)
+			return nil
+		}
+	}
+	for i := 0; i <= a.cursor && i < len(a.sessionInventory.Sessions); i++ {
+		if a.sessionInventory.Sessions[i].NeedsAttention() {
+			a.cursor = i
+			a.refreshPreview(false)
+			return nil
+		}
+	}
+	a.status = "No sessions need attention."
 	return nil
 }
 
@@ -1790,6 +1864,16 @@ func sessionInventorySummary(row inventory.Session, now time.Time) string {
 			parts = append(parts, "repo "+row.WorktreePath)
 		}
 	}
+	if row.Attention != nil {
+		attention := "attention acknowledged"
+		if !row.Attention.Acknowledged {
+			attention = "attention unread"
+		}
+		if !row.Attention.At.IsZero() && !now.Before(row.Attention.At) {
+			attention += " " + compactDuration(now.Sub(row.Attention.At)) + " ago"
+		}
+		parts = append(parts, attention)
+	}
 	if !row.Activity.IsZero() && !now.Before(row.Activity) {
 		elapsed := now.Sub(row.Activity)
 		if elapsed < time.Minute {
@@ -1845,12 +1929,35 @@ func (a *App) doKill(sess inventory.Session, removeWt bool, wtRoot string) {
 	} else if err := agent.DefaultStore().Delete(sess.Name); err != nil {
 		a.status = "Killed '" + sess.Name + "', but could not clear its lifecycle event."
 	}
-	a.sessionInventory = buildInventory(a.markers)
-	if a.cursor >= len(a.sessionInventory.Sessions) {
-		a.cursor = max(0, len(a.sessionInventory.Sessions)-1)
-	}
-	a.invalidatePreview()
+	a.refreshInventory(false)
 	a.mode = modeList
+}
+
+func (a *App) refreshInventory(notify bool) {
+	selected := ""
+	if a.cursor >= 0 && a.cursor < len(a.sessionInventory.Sessions) {
+		selected = a.sessionInventory.Sessions[a.cursor].Name
+	}
+	next := inventory.AttentionFirst(buildInventory(a.markers))
+	if notify {
+		if transitions := inventory.AttentionTransitions(a.sessionInventory, next); len(transitions) > 0 {
+			session := transitions[0]
+			detail := session.Assessment.Summary
+			if detail == "" && session.Attention != nil {
+				detail = session.Attention.Summary
+			}
+			a.status = "Attention: " + session.Name
+			if detail != "" {
+				a.status += " — " + detail
+			}
+		}
+	}
+	if a.attentionOnly {
+		next = inventory.AttentionOnly(next)
+	}
+	a.sessionInventory = next
+	a.cursor = cursorForSession(next, selected)
+	a.invalidatePreview()
 }
 
 func buildInventory(markers agent.Markers) inventory.Snapshot {
