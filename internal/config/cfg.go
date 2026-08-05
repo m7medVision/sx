@@ -3,9 +3,12 @@
 package config
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/m7medVision/sx/internal/agent"
 
@@ -20,10 +23,11 @@ type Files struct {
 
 // Config is the merged sx configuration.
 type Config struct {
-	WorktreeDir   string        `yaml:"worktree_dir"`
-	Files         Files         `yaml:"files"`
-	Agents        agent.Markers `yaml:"agents"`         // extra agent-detection markers
-	ReviewCommand string        `yaml:"review_command"` // explicit external review command
+	WorktreeDir   string            `yaml:"worktree_dir"`
+	Files         Files             `yaml:"files"`
+	Agents        agent.Markers     `yaml:"agents"`         // extra agent-detection markers
+	ReviewCommand string            `yaml:"review_command"` // explicit external review command
+	Bindings      map[string]string `yaml:"bindings"`       // action name -> key
 }
 
 // Scope identifies which config file is being edited.
@@ -74,6 +78,93 @@ func (c Config) Markers() agent.Markers {
 // Default config used when nothing is on disk.
 func defaults() Config {
 	return Config{WorktreeDir: ".worktrees"}
+}
+
+// DefaultBindings are the primary familiar controls for actions exposed by the
+// command palette. Additional legacy aliases (such as j/k) remain UI details.
+func DefaultBindings() map[string]string {
+	return map[string]string{
+		"switch-session": "enter", "new-session": "ctrl-n", "new-worktree": "ctrl-w",
+		"kill-session": "ctrl-x", "review-worktree": "r", "move-up": "up",
+		"move-down": "down", "toggle-preview": "p", "toggle-attention": "a",
+		"next-attention": "n", "help": "?", "config": "c", "command-palette": ":",
+		"quit": "q",
+	}
+}
+
+// LoadBindings loads and resolves bindings from the global then project scope.
+// Unlike Load, it returns malformed configuration to the interactive caller.
+func LoadBindings(repoRoot string) (map[string]string, error) {
+	overrides := make(map[string]string)
+	global, err := GlobalPath()
+	if err != nil {
+		return nil, fmt.Errorf("find global config: %w", err)
+	}
+	paths := []string{global}
+	if repoRoot != "" {
+		paths = append(paths, ProjectPath(repoRoot))
+	}
+	for _, path := range paths {
+		cfg, err := LoadScope(path)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", path, err)
+		}
+		for action, key := range cfg.Bindings {
+			overrides[action] = key
+		}
+	}
+	return ResolveBindings(overrides)
+}
+
+// ResolveBindings overlays developer bindings on the defaults. Each action may
+// have one binding and each binding may invoke one action; violations are
+// rejected rather than silently choosing an arbitrary winner.
+func ResolveBindings(overrides map[string]string) (map[string]string, error) {
+	resolved := DefaultBindings()
+	valid := DefaultBindings()
+	actions := make([]string, 0, len(overrides))
+	for action := range overrides {
+		actions = append(actions, action)
+	}
+	sort.Strings(actions)
+	for _, action := range actions {
+		key := overrides[action]
+		if _, ok := valid[action]; !ok {
+			return nil, fmt.Errorf("unknown action %q", action)
+		}
+		if !validBindingKey(key) {
+			return nil, fmt.Errorf("invalid binding %q for action %q", key, action)
+		}
+		resolved[action] = normalizeBindingKey(key)
+	}
+	used := make(map[string]string, len(resolved))
+	actions = actions[:0]
+	for action := range resolved {
+		actions = append(actions, action)
+	}
+	sort.Strings(actions)
+	for _, action := range actions {
+		key := resolved[action]
+		if other, occupied := used[key]; occupied {
+			return nil, fmt.Errorf("binding %q is assigned to both %q and %q", key, other, action)
+		}
+		used[key] = action
+	}
+	return resolved, nil
+}
+
+func normalizeBindingKey(key string) string { return strings.ToLower(strings.TrimSpace(key)) }
+
+func validBindingKey(key string) bool {
+	key = normalizeBindingKey(key)
+	if len([]rune(key)) == 1 {
+		return true
+	}
+	switch key {
+	case "enter", "up", "down", "esc", "tab":
+		return true
+	}
+	return len(key) == len("ctrl-x") && strings.HasPrefix(key, "ctrl-") && key[len("ctrl-")] >= 'a' && key[len("ctrl-")] <= 'z'
 }
 
 // GlobalPath is the path to the global config file.
@@ -160,6 +251,14 @@ func merge(cfg *Config, path string) {
 	}
 	if in.ReviewCommand != "" {
 		cfg.ReviewCommand = in.ReviewCommand
+	}
+	if len(in.Bindings) > 0 {
+		if cfg.Bindings == nil {
+			cfg.Bindings = make(map[string]string)
+		}
+		for action, key := range in.Bindings {
+			cfg.Bindings[action] = key
+		}
 	}
 	// Agent markers accumulate across config layers (global + per-project).
 	cfg.Agents.NeedsInput = append(cfg.Agents.NeedsInput, in.Agents.NeedsInput...)

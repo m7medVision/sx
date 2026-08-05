@@ -3,6 +3,11 @@
 
 worktree_dir: .worktrees      # where worktrees are created, relative to repo root
 review_command: code --reuse-window . # optional; runs only when explicitly requested from review
+# Optional action overrides. Keys are action names and values are one of a
+# character, enter, up, down, esc, tab, ctrl-n, ctrl-w, ctrl-x, or ctrl-p.
+# bindings:
+#   command-palette: ctrl-p
+#   new-session: ctrl-o
 
 files:
   copy:

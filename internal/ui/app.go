@@ -40,11 +40,14 @@ const (
 	modeConfigEdit
 	modeCfgPick
 	modeReview
+	modePalette
 )
 
 // App holds TUI state. Target is the session to switch to after the popup closes.
 type App struct {
 	mode mode
+
+	bindings map[string]string
 
 	paneDir  string
 	inRepo   bool
@@ -107,6 +110,10 @@ type App struct {
 	cfgPickTruncated   bool
 	cfgPickLastAdded   int
 	cfgPickLastAddedAt time.Time
+
+	paletteQuery    string
+	paletteFiltered []string
+	paletteCursor   int
 }
 
 // configRow is one editable line in the config view.
@@ -133,6 +140,11 @@ func Run(paneDir, version string) (string, error) {
 	g.InputEsc = true
 
 	app := newApp(paneDir, version)
+	bindings, err := config.LoadBindings(app.repoRoot)
+	if err != nil {
+		return "", fmt.Errorf("invalid bindings configuration: %w", err)
+	}
+	app.bindings = bindings
 	g.SetManagerFunc(app.layout)
 	if err := app.bindKeys(g); err != nil {
 		return "", err
@@ -182,6 +194,7 @@ func newApp(paneDir, version string) *App {
 		previewOn:        true,
 		cfgGlobal:        gValues,
 		cfgProject:       pValues,
+		bindings:         config.DefaultBindings(),
 	}
 }
 
@@ -315,7 +328,7 @@ func (a *App) layout(g *gocui.Gui) error {
 		return nil
 	}
 
-	for _, name := range []string{"banner", "list", "preview", "prompt", "branches", "confirm", "review", "help", "config", "cfgedit", "cfgpick", "cfgpicklist"} {
+	for _, name := range []string{"banner", "list", "preview", "prompt", "branches", "confirm", "review", "help", "config", "cfgedit", "cfgpick", "cfgpicklist", "palette", "palettelist"} {
 		if v, err := g.View(name); err == nil {
 			v.Visible = false
 		}
@@ -361,6 +374,8 @@ func (a *App) layout(g *gocui.Gui) error {
 		return a.layoutConfig(g, maxX, top, bodyBottom, maxY)
 	case modeCfgPick:
 		return a.layoutCfgPick(g, maxX, top, bodyBottom, maxY)
+	case modePalette:
+		return a.layoutPalette(g, maxX, top, bodyBottom, maxY)
 	}
 	return nil
 }
@@ -466,6 +481,53 @@ func (a *App) layoutList(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
 	}
 
 	return a.layoutHelp(g, maxX, bodyBottom, maxY, a.listHelp())
+}
+
+func (a *App) layoutPalette(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
+	if err := a.setView(g, "palette", 0, top, maxX-1, top+2); err != nil {
+		return err
+	}
+	p, _ := g.View("palette")
+	p.Visible, p.Editable, p.Editor = true, true, gocui.DefaultEditor
+	p.Title = " Command palette — search actions "
+	query := strings.TrimSpace(strings.TrimRight(p.Buffer(), "\n"))
+	if query != a.paletteQuery {
+		a.paletteQuery, a.paletteCursor = query, 0
+	}
+	a.paletteFiltered = filterActions(a.paletteQuery)
+	if a.paletteCursor >= len(a.paletteFiltered) {
+		a.paletteCursor = len(a.paletteFiltered) - 1
+	}
+	if err := a.setView(g, "palettelist", 0, top+3, maxX-1, bodyBottom); err != nil {
+		return err
+	}
+	v, _ := g.View("palettelist")
+	v.Visible, v.Highlight = true, true
+	v.Clear()
+	for i, action := range a.paletteFiltered {
+		prefix := "  "
+		if i == a.paletteCursor {
+			prefix = "› "
+		}
+		fmt.Fprintf(v, "%s%s  \x1b[90m%s\x1b[0m\n", prefix, actionLabel(action), a.bindings[action])
+	}
+	if _, err := g.SetCurrentView("palette"); err != nil {
+		return err
+	}
+	return a.layoutHelp(g, maxX, bodyBottom, maxY, " type: search   ↑/↓: select   enter: run   esc: back")
+}
+
+func actionLabel(action string) string { return strings.ReplaceAll(action, "-", " ") }
+
+func filterActions(query string) []string {
+	actions := make([]string, 0, len(config.DefaultBindings()))
+	for action := range config.DefaultBindings() {
+		if _, ok := fuzzyMatch(query, actionLabel(action)); ok {
+			actions = append(actions, action)
+		}
+	}
+	sort.Strings(actions)
+	return actions
 }
 
 func (a *App) layoutNewSession(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
@@ -1017,10 +1079,23 @@ func (a *App) bindKeys(g *gocui.Gui) error {
 			{'?', a.onToggleHelp},
 			{'c', a.onToggleConfig},
 			{'r', a.onReview},
+			{':', a.onOpenPalette},
 		} {
 			if err := g.SetKeybinding(view, pair.key, gocui.ModNone, pair.fn); err != nil {
 				return err
 			}
+		}
+	}
+
+	for _, pair := range []struct {
+		key interface{}
+		fn  func(*gocui.Gui, *gocui.View) error
+	}{
+		{gocui.KeyArrowUp, a.onPaletteUp}, {gocui.KeyArrowDown, a.onPaletteDown},
+		{gocui.KeyEnter, a.onPaletteEnter}, {gocui.KeyEsc, a.onQuitOrBack},
+	} {
+		if err := g.SetKeybinding("palette", pair.key, gocui.ModNone, pair.fn); err != nil {
+			return err
 		}
 	}
 
@@ -1112,7 +1187,123 @@ func (a *App) bindKeys(g *gocui.Gui) error {
 			return err
 		}
 	}
+	return a.bindConfiguredActions(g)
+}
+
+func bindingKey(key string) interface{} {
+	switch key {
+	case "enter":
+		return gocui.KeyEnter
+	case "up":
+		return gocui.KeyArrowUp
+	case "down":
+		return gocui.KeyArrowDown
+	case "esc":
+		return gocui.KeyEsc
+	case "tab":
+		return gocui.KeyTab
+	case "ctrl-n":
+		return gocui.KeyCtrlN
+	case "ctrl-w":
+		return gocui.KeyCtrlW
+	case "ctrl-x":
+		return gocui.KeyCtrlX
+	default:
+		if strings.HasPrefix(key, "ctrl-") {
+			return gocui.KeyCtrlA + gocui.Key(key[len("ctrl-")]-'a')
+		}
+		return []rune(key)[0]
+	}
+}
+
+func actionView(action string) string {
+	switch action {
+	case "switch-session", "new-session", "new-worktree", "kill-session", "move-up", "move-down":
+		return ""
+	default:
+		return "list"
+	}
+}
+
+// bindConfiguredActions replaces each primary default binding with its resolved
+// key. Thus an override moves an action instead of leaving two live bindings.
+func (a *App) bindConfiguredActions(g *gocui.Gui) error {
+	defaults := config.DefaultBindings()
+	for action, old := range defaults {
+		view := actionView(action)
+		_ = g.DeleteKeybinding(view, bindingKey(old), gocui.ModNone)
+		key := a.bindings[action]
+		if err := g.SetKeybinding(view, bindingKey(key), gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error { return a.DispatchAction(action, g, v) }); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (a *App) onOpenPalette(g *gocui.Gui, v *gocui.View) error {
+	if a.mode != modeList {
+		return nil
+	}
+	a.mode, a.paletteQuery, a.paletteCursor = modePalette, "", 0
+	_ = g.DeleteView("palette")
+	return nil
+}
+
+func (a *App) onPaletteUp(g *gocui.Gui, v *gocui.View) error {
+	if a.mode == modePalette && a.paletteCursor > 0 {
+		a.paletteCursor--
+	}
+	return nil
+}
+func (a *App) onPaletteDown(g *gocui.Gui, v *gocui.View) error {
+	if a.mode == modePalette && a.paletteCursor < len(a.paletteFiltered)-1 {
+		a.paletteCursor++
+	}
+	return nil
+}
+func (a *App) onPaletteEnter(g *gocui.Gui, v *gocui.View) error {
+	if a.mode != modePalette || a.paletteCursor < 0 || a.paletteCursor >= len(a.paletteFiltered) {
+		return nil
+	}
+	return a.DispatchAction(a.paletteFiltered[a.paletteCursor], g, v)
+}
+
+// DispatchAction is the single action entry point used by the searchable
+// catalog and bindings. Unknown actions are rejected explicitly.
+func (a *App) DispatchAction(action string, g *gocui.Gui, v *gocui.View) error {
+	a.mode = modeList
+	switch action {
+	case "switch-session":
+		return a.onEnter(g, v)
+	case "new-session":
+		return a.onCtrlN(g, v)
+	case "new-worktree":
+		return a.onCtrlW(g, v)
+	case "kill-session":
+		return a.onCtrlX(g, v)
+	case "review-worktree":
+		return a.onReview(g, v)
+	case "move-up":
+		return a.onUp(g, v)
+	case "move-down":
+		return a.onDown(g, v)
+	case "toggle-preview":
+		return a.onTogglePreview(g, v)
+	case "toggle-attention":
+		return a.onToggleAttentionOnly(g, v)
+	case "next-attention":
+		return a.onNo(g, v)
+	case "help":
+		return a.onToggleHelp(g, v)
+	case "config":
+		return a.onToggleConfig(g, v)
+	case "command-palette":
+		return a.onOpenPalette(g, v)
+	case "quit":
+		return a.onQuitOrBack(g, v)
+	default:
+		return fmt.Errorf("unsupported action %q", action)
+	}
 }
 
 func (a *App) onToggleAttentionOnly(g *gocui.Gui, v *gocui.View) error {
@@ -1700,7 +1891,7 @@ func (a *App) onQuitOrBack(g *gocui.Gui, v *gocui.View) error {
 	case modeHelp:
 		a.mode = modeList
 		return nil
-	case modeConfig, modeConfigEdit:
+	case modeConfig, modeConfigEdit, modePalette:
 		a.mode = modeList
 		a.status = ""
 		return nil
@@ -1851,6 +2042,8 @@ func (a *App) onEnter(g *gocui.Gui, v *gocui.View) error {
 		return a.createPlainSession(g)
 	case modeBranchPick:
 		return a.createWorktreeSession(g)
+	case modePalette:
+		return a.onPaletteEnter(g, v)
 	}
 	return nil
 }
