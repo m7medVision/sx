@@ -48,6 +48,7 @@ type App struct {
 	mode mode
 
 	bindings map[string]string
+	actions  map[string]config.ProjectAction
 
 	paneDir  string
 	inRepo   bool
@@ -140,6 +141,11 @@ func Run(paneDir, version string) (string, error) {
 	g.InputEsc = true
 
 	app := newApp(paneDir, version)
+	actions, err := config.LoadProjectActions(app.repoRoot)
+	if err != nil {
+		return "", fmt.Errorf("invalid project actions configuration: %w", err)
+	}
+	app.actions = actions
 	bindings, err := config.LoadBindings(app.repoRoot)
 	if err != nil {
 		return "", fmt.Errorf("invalid bindings configuration: %w", err)
@@ -195,6 +201,7 @@ func newApp(paneDir, version string) *App {
 		cfgGlobal:        gValues,
 		cfgProject:       pValues,
 		bindings:         config.DefaultBindings(),
+		actions:          map[string]config.ProjectAction{},
 	}
 }
 
@@ -494,7 +501,7 @@ func (a *App) layoutPalette(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error
 	if query != a.paletteQuery {
 		a.paletteQuery, a.paletteCursor = query, 0
 	}
-	a.paletteFiltered = filterActions(a.paletteQuery)
+	a.paletteFiltered = filterActions(a.paletteQuery, a.actions)
 	if a.paletteCursor >= len(a.paletteFiltered) {
 		a.paletteCursor = len(a.paletteFiltered) - 1
 	}
@@ -519,15 +526,26 @@ func (a *App) layoutPalette(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error
 
 func actionLabel(action string) string { return strings.ReplaceAll(action, "-", " ") }
 
-func filterActions(query string) []string {
-	actions := make([]string, 0, len(config.DefaultBindings()))
+func actionCatalog(projectActions map[string]config.ProjectAction) []string {
+	actions := make([]string, 0, len(config.DefaultBindings())+len(projectActions))
 	for action := range config.DefaultBindings() {
-		if _, ok := fuzzyMatch(query, actionLabel(action)); ok {
-			actions = append(actions, action)
-		}
+		actions = append(actions, action)
+	}
+	for action := range projectActions {
+		actions = append(actions, action)
 	}
 	sort.Strings(actions)
 	return actions
+}
+
+func filterActions(query string, projectActions map[string]config.ProjectAction) []string {
+	var matched []string
+	for _, action := range actionCatalog(projectActions) {
+		if _, ok := fuzzyMatch(query, actionLabel(action)); ok {
+			matched = append(matched, action)
+		}
+	}
+	return matched
 }
 
 func (a *App) layoutNewSession(g *gocui.Gui, maxX, top, bodyBottom, maxY int) error {
@@ -1272,6 +1290,9 @@ func (a *App) onPaletteEnter(g *gocui.Gui, v *gocui.View) error {
 // catalog and bindings. Unknown actions are rejected explicitly.
 func (a *App) DispatchAction(action string, g *gocui.Gui, v *gocui.View) error {
 	a.mode = modeList
+	if projectAction, ok := a.actions[action]; ok {
+		return a.runProjectAction(action, projectAction)
+	}
 	switch action {
 	case "switch-session":
 		return a.onEnter(g, v)
@@ -2108,27 +2129,54 @@ func (a *App) createWorktreeSession(g *gocui.Gui) error {
 		a.mode = modeList
 		return nil
 	}
+	return a.createWorktreeSessionFromSource(branch, "")
+}
 
+// runProjectAction creates or reuses the action's source worktree and session.
+// Invalid sources are resolved before any setup or tmux operation, so a bad
+// action cannot leave an unintended branch or session behind.
+func (a *App) runProjectAction(name string, action config.ProjectAction) error {
+	if strings.TrimSpace(action.Source) == "" {
+		a.status = fmt.Sprintf("Project action %q is invalid: source is required.", name)
+		return nil
+	}
+	return a.createWorktreeSessionFromSource(action.Source, action.Command)
+}
+
+func (a *App) createWorktreeSessionFromSource(source, initialCommand string) error {
 	cfg := config.Load(a.repoRoot)
-	safe := strings.ReplaceAll(branch, "/", "-")
+	safe := strings.ReplaceAll(source, "/", "-")
 	wtPath := filepath.Join(a.repoRoot, cfg.WorktreeDir, safe)
 	sessionName := filepath.Base(a.repoRoot) + "-" + safe
 
-	_ = git.EnsureWorktreesIgnored(a.repoRoot, cfg.WorktreeDir)
-
-	resolved, err := git.EnsureWorktree(a.repoRoot, branch, wtPath)
+	// EnsureWorktree validates source before modifying Git state.
+	resolved, err := git.EnsureWorktree(a.repoRoot, source, wtPath)
 	if err != nil {
-		a.status = "git worktree add failed: " + err.Error()
+		a.status = "Could not run worktree action: " + err.Error()
+		a.mode = modeList
+		return nil
+	}
+	if err := git.EnsureWorktreesIgnored(a.repoRoot, cfg.WorktreeDir); err != nil {
+		a.status = "worktree created, but could not update .gitignore: " + err.Error()
 		a.mode = modeList
 		return nil
 	}
 	if err := cfg.ApplyFiles(a.repoRoot, resolved); err != nil {
 		a.status = "worktree created, but copying files failed: " + err.Error()
+		a.mode = modeList
+		return nil
 	}
 	if err := tmux.NewSession(sessionName, resolved); err != nil {
 		a.status = "Failed to create session: " + err.Error()
 		a.mode = modeList
 		return nil
+	}
+	if command := strings.TrimSpace(initialCommand); command != "" {
+		if err := tmux.SendKeys(sessionName, command); err != nil {
+			a.status = "Session created, but could not run initial command: " + err.Error()
+			a.mode = modeList
+			return nil
+		}
 	}
 	a.Target = sessionName
 	return gocui.ErrQuit

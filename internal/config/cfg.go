@@ -21,13 +21,22 @@ type Files struct {
 	Symlink []string `yaml:"symlink"`
 }
 
+// ProjectAction is a named, repeatable worktree session. Source must name an
+// existing local (optionally local/<branch>) or remote branch. Command, when
+// set, is typed into the newly selected session after normal setup completes.
+type ProjectAction struct {
+	Source  string `yaml:"source"`
+	Command string `yaml:"command"`
+}
+
 // Config is the merged sx configuration.
 type Config struct {
-	WorktreeDir   string            `yaml:"worktree_dir"`
-	Files         Files             `yaml:"files"`
-	Agents        agent.Markers     `yaml:"agents"`         // extra agent-detection markers
-	ReviewCommand string            `yaml:"review_command"` // explicit external review command
-	Bindings      map[string]string `yaml:"bindings"`       // action name -> key
+	WorktreeDir   string                   `yaml:"worktree_dir"`
+	Files         Files                    `yaml:"files"`
+	Agents        agent.Markers            `yaml:"agents"`         // extra agent-detection markers
+	ReviewCommand string                   `yaml:"review_command"` // explicit external review command
+	Bindings      map[string]string        `yaml:"bindings"`       // action name -> key
+	Actions       map[string]ProjectAction `yaml:"actions"`        // named project worktree sessions
 }
 
 // Scope identifies which config file is being edited.
@@ -94,6 +103,48 @@ func DefaultBindings() map[string]string {
 
 // LoadBindings loads and resolves bindings from the global then project scope.
 // Unlike Load, it returns malformed configuration to the interactive caller.
+// LoadProjectActions loads named actions from global then project config.
+// Project actions with the same name replace global ones. Unlike Load, it
+// reports malformed or incomplete action configuration before anything can
+// create a worktree or tmux session.
+func LoadProjectActions(repoRoot string) (map[string]ProjectAction, error) {
+	actions := make(map[string]ProjectAction)
+	global, err := GlobalPath()
+	if err != nil {
+		return nil, fmt.Errorf("find global config: %w", err)
+	}
+	paths := []string{global}
+	if repoRoot != "" {
+		paths = append(paths, ProjectPath(repoRoot))
+	}
+	for _, path := range paths {
+		cfg, err := LoadScope(path)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", path, err)
+		}
+		for name, action := range cfg.Actions {
+			if _, reserved := DefaultBindings()[name]; reserved {
+				return nil, fmt.Errorf("invalid action configuration in %s: action %q conflicts with a built-in action", path, name)
+			}
+			if err := validateProjectAction(name, action); err != nil {
+				return nil, fmt.Errorf("invalid action configuration in %s: %w", path, err)
+			}
+			actions[name] = action
+		}
+	}
+	return actions, nil
+}
+
+func validateProjectAction(name string, action ProjectAction) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("action name cannot be empty")
+	}
+	if strings.TrimSpace(action.Source) == "" {
+		return fmt.Errorf("action %q requires a source", name)
+	}
+	return nil
+}
+
 func LoadBindings(repoRoot string) (map[string]string, error) {
 	overrides := make(map[string]string)
 	global, err := GlobalPath()
@@ -258,6 +309,14 @@ func merge(cfg *Config, path string) {
 		}
 		for action, key := range in.Bindings {
 			cfg.Bindings[action] = key
+		}
+	}
+	if len(in.Actions) > 0 {
+		if cfg.Actions == nil {
+			cfg.Actions = make(map[string]ProjectAction)
+		}
+		for name, action := range in.Actions {
+			cfg.Actions[name] = action
 		}
 	}
 	// Agent markers accumulate across config layers (global + per-project).
