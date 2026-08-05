@@ -2,6 +2,9 @@ package ui
 
 import (
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +36,64 @@ func TestSessionInventorySummaryIncludesGitWorktreeAndActivity(t *testing.T) {
 func TestSessionInventorySummaryHandlesMissingMetadata(t *testing.T) {
 	if got := sessionInventorySummary(inventory.Session{}, time.Now()); got != "" {
 		t.Fatalf("summary = %q, want empty", got)
+	}
+}
+
+func TestReviewOnlyOpensForLinkedWorktrees(t *testing.T) {
+	linked := inventory.Session{Name: "feature", LinkedWorktree: true, WorktreePath: testReviewWorktree(t)}
+	app := &App{mode: modeList, sessionInventory: inventory.Snapshot{Sessions: []inventory.Session{linked}}}
+	if err := app.startReview(); err != nil {
+		t.Fatal(err)
+	}
+	if app.mode != modeReview || app.reviewSession != linked {
+		t.Fatalf("review state = mode %v session %#v", app.mode, app.reviewSession)
+	}
+	if !strings.Contains(app.review.Status, "README") || !strings.Contains(app.review.Diff, "review me") {
+		t.Fatalf("review = %#v", app.review)
+	}
+
+	app = &App{mode: modeList, sessionInventory: inventory.Snapshot{Sessions: []inventory.Session{{Name: "ordinary"}}}}
+	if err := app.startReview(); err != nil {
+		t.Fatal(err)
+	}
+	if app.mode != modeList || !strings.Contains(app.status, "linked worktree") {
+		t.Fatalf("ordinary review = mode %v status %q", app.mode, app.status)
+	}
+}
+
+func testReviewWorktree(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "README")
+	run("commit", "-m", "initial")
+	run("branch", "feature")
+	worktree := filepath.Join(repo, "feature")
+	run("worktree", "add", worktree, "feature")
+	if err := os.WriteFile(filepath.Join(worktree, "README"), []byte("review me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return worktree
+}
+
+func TestReviewSwitchIsExplicitAndDoesNotRemoveWorktree(t *testing.T) {
+	app := &App{mode: modeReview, reviewSession: inventory.Session{Name: "feature", LinkedWorktree: true, WorktreePath: "/repo/.worktrees/feature"}}
+	if err := app.switchReviewedWorktree(nil, nil); !errors.Is(err, gocui.ErrQuit) {
+		t.Fatalf("switch error = %v", err)
+	}
+	if app.Target != "feature" {
+		t.Fatalf("target = %q", app.Target)
 	}
 }
 
