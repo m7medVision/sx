@@ -3,9 +3,11 @@ package git
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -27,23 +29,41 @@ func RepoRoot(dir string) (string, error) {
 	return git(dir, "rev-parse", "--show-toplevel")
 }
 
-// Branches lists local + remote branches, stripping the origin/ prefix and
-// dropping the bogus `origin` and `HEAD` entries. Sorted and de-duplicated.
+// Branches lists local + remote branches, preserving remote names so sources
+// from different remotes remain unambiguous. It drops symbolic remote entries
+// such as origin/HEAD. Sorted and de-duplicated.
 func Branches(repoRoot string) []string {
-	out, err := git(repoRoot, "branch", "--all", "--format=%(refname:short)")
+	out, err := git(repoRoot, "branch", "--all", "--format=%(refname)")
 	if err != nil || out == "" {
 		return nil
 	}
-	seen := map[string]bool{}
-	var branches []string
-	for _, b := range strings.Split(out, "\n") {
-		b = strings.TrimPrefix(b, "origin/")
-		if b == "" || b == "origin" || b == "HEAD" || seen[b] {
-			continue
+
+	remotes := map[string]bool{}
+	var locals []string
+	for _, ref := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(ref, "refs/heads/"):
+			locals = append(locals, strings.TrimPrefix(ref, "refs/heads/"))
+		case strings.HasPrefix(ref, "refs/remotes/"):
+			remote := strings.TrimPrefix(ref, "refs/remotes/")
+			if remote != "" && !strings.HasSuffix(remote, "/HEAD") {
+				remotes[remote] = true
+			}
 		}
-		seen[b] = true
-		branches = append(branches, b)
 	}
+
+	branches := make([]string, 0, len(locals)+len(remotes))
+	for _, local := range locals {
+		if remotes[local] {
+			branches = append(branches, "local/"+local)
+		} else {
+			branches = append(branches, local)
+		}
+	}
+	for remote := range remotes {
+		branches = append(branches, remote)
+	}
+	sort.Strings(branches)
 	return branches
 }
 
@@ -74,31 +94,50 @@ func hasRef(repoRoot, ref string) bool {
 	return err == nil
 }
 
-// EnsureWorktree resolves (creating if needed) a worktree at wtPath for branch,
-// using the same fallback chain as the original bash switcher:
-//
-//	reuse existing worktree → local branch → origin/<branch> → brand-new branch.
-func EnsureWorktree(repoRoot, branch, wtPath string) (string, error) {
-	if _, err := os.Stat(wtPath); err == nil {
-		return wtPath, nil // already there
+// EnsureWorktree creates or reuses a worktree for an existing local or remote
+// worktree source branch. A missing source is an error; sx never creates a
+// branch solely because a developer typed its name.
+func EnsureWorktree(repoRoot, source, wtPath string) (string, error) {
+	branch, ref, err := resolveWorktreeSource(repoRoot, source)
+	if err != nil {
+		return "", err
 	}
 	if existing := WorktreeForBranch(repoRoot, branch); existing != "" {
 		return existing, nil
 	}
+	if _, err := os.Stat(wtPath); err == nil {
+		return "", fmt.Errorf("worktree path %q already exists for a different source", wtPath)
+	}
 
-	var err error
-	switch {
-	case hasRef(repoRoot, "refs/heads/"+branch):
+	if ref == branch {
 		_, err = git(repoRoot, "worktree", "add", wtPath, branch)
-	case hasRef(repoRoot, "refs/remotes/origin/"+branch):
-		_, err = git(repoRoot, "worktree", "add", "-b", branch, wtPath, "origin/"+branch)
-	default:
-		_, err = git(repoRoot, "worktree", "add", "-b", branch, wtPath)
+	} else {
+		_, err = git(repoRoot, "worktree", "add", "-b", branch, wtPath, ref)
 	}
 	if err != nil {
 		return "", err
 	}
 	return wtPath, nil
+}
+
+// resolveWorktreeSource returns the local branch to check out and the ref from
+// which it should be created. Remote sources use an sx-prefixed local branch so
+// selecting origin/topic and upstream/topic cannot silently mean the same
+// checkout.
+func resolveWorktreeSource(repoRoot, source string) (branch, ref string, err error) {
+	if local, ok := strings.CutPrefix(source, "local/"); ok {
+		if hasRef(repoRoot, "refs/heads/"+local) {
+			return local, local, nil
+		}
+		return "", "", fmt.Errorf("worktree source branch %q does not exist locally", source)
+	}
+	if hasRef(repoRoot, "refs/remotes/"+source) {
+		return "sx/" + source, "refs/remotes/" + source, nil
+	}
+	if hasRef(repoRoot, "refs/heads/"+source) {
+		return source, source, nil
+	}
+	return "", "", fmt.Errorf("worktree source branch %q does not exist locally or on a configured remote", source)
 }
 
 // IsLinkedWorktree reports whether dir is a *linked* git worktree (its repo

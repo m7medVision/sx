@@ -45,7 +45,8 @@ func TestWorktreeAndFiles(t *testing.T) {
 		t.Fatalf(".gitignore not written once: %q", gi)
 	}
 
-	// 2. New-branch worktree is created.
+	// 2. An existing source branch gets its own worktree.
+	run("branch", "feature/x")
 	wtPath := filepath.Join(repo, ".worktrees", "feature-x")
 	resolved, err := git.EnsureWorktree(repo, "feature/x", wtPath)
 	if err != nil {
