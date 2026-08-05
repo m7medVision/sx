@@ -100,6 +100,13 @@ func NewSession(name, dir string) error {
 	return exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir).Run()
 }
 
+// SendKeys enters command into a session's active shell. It is deliberately
+// separate from NewSession so the shell remains available after a short-lived
+// initial command completes.
+func SendKeys(session, command string) error {
+	return exec.Command("tmux", "send-keys", "-t", session, command, "Enter").Run()
+}
+
 // KillSession kills a session by name.
 func KillSession(name string) error {
 	return exec.Command("tmux", "kill-session", "-t", name).Run()

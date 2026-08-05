@@ -9,6 +9,14 @@ review_command: code --reuse-window . # optional; runs only when explicitly requ
 #   command-palette: ctrl-p
 #   new-session: ctrl-o
 
+# Named project actions appear in the command palette. Each source must name an
+# existing local (use local/<branch> when it conflicts with a remote) or remote
+# branch; command is optional and is entered in the created/reused session.
+# actions:
+#   review-release:
+#     source: origin/release
+#     command: agent review
+
 files:
   copy:
     - .env
